@@ -3,6 +3,7 @@ package cc.carm.outsource.plugin.coreprotectaddon;
 import cc.carm.lib.easyplugin.EasyPlugin;
 import cc.carm.lib.mineconfiguration.bukkit.MineConfiguration;
 import cc.carm.outsource.plugin.coreprotectaddon.command.QueryCommands;
+import cc.carm.outsource.plugin.coreprotectaddon.command.QueryTabCompleter;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages;
 import cc.carm.outsource.plugin.coreprotectaddon.manager.DataManager;
@@ -41,6 +42,9 @@ public class Main extends EasyPlugin implements Listener {
 
         log("注册命令...");
         registerCommand("coreprotectquery", new QueryCommands(this));
+        if (getCommand("coreprotectquery") != null) {
+            getCommand("coreprotectquery").setTabCompleter(new QueryTabCompleter());
+        }
 
         return true;
     }

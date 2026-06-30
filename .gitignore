@@ -1,4 +1,5 @@
 .asset/
+.m2repo/
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

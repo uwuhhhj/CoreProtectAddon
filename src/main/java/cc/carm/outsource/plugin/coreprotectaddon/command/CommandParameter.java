@@ -4,7 +4,9 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -49,6 +51,27 @@ public record CommandParameter(@NotNull String[] inputs, @NotNull Map<String, St
             params.put(key, value);
         }
         return params;
+    }
+
+    static Set<String> readKeys(@NotNull String[] inputs, int startInclusive, int endExclusive) {
+        Set<String> keys = new HashSet<>();
+        if (startInclusive >= endExclusive) {
+            return keys;
+        }
+
+        int safeStart = Math.max(0, startInclusive);
+        int safeEnd = Math.min(inputs.length, endExclusive);
+        if (safeStart >= safeEnd) {
+            return keys;
+        }
+
+        String[] slice = new String[safeEnd - safeStart];
+        System.arraycopy(inputs, safeStart, slice, 0, slice.length);
+        Matcher matcher = PARAMS_PATTERN.matcher(String.join(" ", slice));
+        while (matcher.find()) {
+            keys.add(matcher.group(1).toLowerCase());
+        }
+        return keys;
     }
 
     static boolean validate(@NotNull String[] inputs, @NotNull String... keys) {
