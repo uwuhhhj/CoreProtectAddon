@@ -2,12 +2,16 @@ package cc.carm.outsource.plugin.coreprotectaddon;
 
 import cc.carm.lib.easyplugin.EasyPlugin;
 import cc.carm.lib.mineconfiguration.bukkit.MineConfiguration;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryRequest;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryResult;
 import cc.carm.outsource.plugin.coreprotectaddon.command.QueryCommands;
 import cc.carm.outsource.plugin.coreprotectaddon.command.QueryTabCompleter;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages;
 import cc.carm.outsource.plugin.coreprotectaddon.manager.DataManager;
+import cc.carm.outsource.plugin.coreprotectaddon.service.CoreProtectQueryService;
 import org.bukkit.event.Listener;
+import org.jetbrains.annotations.NotNull;
 
 public class Main extends EasyPlugin implements Listener {
 
@@ -19,6 +23,7 @@ public class Main extends EasyPlugin implements Listener {
 
     protected MineConfiguration configuration;
     protected DataManager dataManager;
+    protected CoreProtectQueryService queryService;
 
     @Override
     protected void load() {
@@ -29,6 +34,7 @@ public class Main extends EasyPlugin implements Listener {
         log("加载数据库...");
         try {
             this.dataManager = new DataManager();
+            this.queryService = new CoreProtectQueryService(this.dataManager);
         } catch (Exception e) {
             e.printStackTrace();
             log("§c数据库加载失败，插件无法正常运行，请确保数据库配置正确！");
@@ -80,6 +86,14 @@ public class Main extends EasyPlugin implements Listener {
 
     public static DataManager getDataManager() {
         return getInstance().dataManager;
+    }
+
+    public @NotNull QueryResult query(@NotNull QueryRequest request) {
+        return this.queryService.query(request);
+    }
+
+    public static CoreProtectQueryService getQueryService() {
+        return getInstance().queryService;
     }
 
 }

@@ -1,23 +1,20 @@
 package cc.carm.outsource.plugin.coreprotectaddon.command.query;
 
 import cc.carm.lib.easyplugin.command.SubCommand;
-import cc.carm.lib.easysql.api.builder.TableQueryBuilder;
 import cc.carm.outsource.plugin.coreprotectaddon.Main;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryRecord;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryRequest;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryResult;
+import cc.carm.outsource.plugin.coreprotectaddon.api.query.QueryType;
 import cc.carm.outsource.plugin.coreprotectaddon.command.CommandParameter;
 import cc.carm.outsource.plugin.coreprotectaddon.command.QueryCommands;
-import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages;
-import cc.carm.outsource.plugin.coreprotectaddon.data.UserKey;
-import cc.carm.outsource.plugin.coreprotectaddon.data.UserKeyType;
-import cc.carm.outsource.plugin.coreprotectaddon.manager.DataManager;
+import cc.carm.outsource.plugin.coreprotectaddon.service.CoreProtectQueryService;
 import cc.carm.outsource.plugin.coreprotectaddon.utils.TimeFormatUtils;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
-import java.sql.ResultSet;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,103 +26,67 @@ public class CommandQueryCommand extends SubCommand<QueryCommands> {
 
     @Override
     public Void execute(JavaPlugin plugin, CommandSender sender, String[] args) throws Exception {
-        DataManager data = Main.getDataManager();
         CommandParameter parameter = CommandParameter.parse(args);
-        long s1 = System.currentTimeMillis();
+        Integer page = parsePage(parameter.get("page", "p"));
+        if (page == null) {
+            PluginMessages.WRONG_PAGE.sendTo(sender);
+            return null;
+        }
 
         Main.getInstance().getScheduler().runAsync(() -> {
+            QueryResult result = Main.getInstance().query(new QueryRequest(
+                    QueryType.COMMAND,
+                    parameter.get("user", "u"),
+                    parameter.get("time", "t"),
+                    page,
+                    null,
+                    parameter.get("content", "c", "command")
+            ));
 
-            TableQueryBuilder query = data.sql().createQuery().inTable(PluginConfig.DATABASE.TABLES.COMMAND.resolve());
-            String timeString = parameter.get("time", "t");
-            if (timeString != null) {
-                Duration[] interval = TimeFormatUtils.parseInterval(timeString);
-                if (interval == null) {
-                    PluginMessages.WRONG_TIME.sendTo(sender);
-                    return;
+            if (!result.success()) {
+                switch (result.errorCode()) {
+                    case CoreProtectQueryService.ERROR_INVALID_TIME -> PluginMessages.WRONG_TIME.sendTo(sender);
+                    case CoreProtectQueryService.ERROR_INVALID_PAGE -> PluginMessages.WRONG_PAGE.sendTo(sender);
+                    case CoreProtectQueryService.ERROR_UNKNOWN_USER -> PluginMessages.UNKNOWN_USER.sendTo(sender, result.message());
+                    default -> {
+                        sender.sendMessage("§c指令查询失败: " + result.message());
+                        Main.severe("指令查询失败: " + result.message());
+                    }
                 }
-
-                long a = System.currentTimeMillis() - interval[0].toMillis();
-                if (interval[1].isZero()) {
-                    query.addCondition("time", ">=", a / 1000);
-                } else {
-                    long b = System.currentTimeMillis() - interval[1].toMillis();
-                    query.addCondition("time", ">=", Math.min(a, b) / 1000);
-                    query.addCondition("time", "<=", Math.max(a, b) / 1000);
-                }
-
+                return;
             }
 
-            String content = parameter.get("content", "c", "command");
-            if (content != null) {
-                query.addCondition("message", "REGEXP", content);
-            }
-
-            String pageString = parameter.get("page", "p");
-            int page = 1;
-            int pageSize = PluginConfig.QUERY.PAGE_SIZE.resolve();
-            if (pageString != null) {
-                try {
-                    page = Integer.parseInt(pageString);
-                    if (page < 1) page = 1;
-                } catch (NumberFormatException ignored) {
-                    PluginMessages.WRONG_PAGE.sendTo(sender);
-                    return;
-                }
-            }
-
-            String username = parameter.get("user", "u");
-            if (username != null) {
-                // 先利用用户名查询用户ID
-                UserKey key = data.getUser(UserKeyType.NAME, username);
-                if (key == null) {
-                    PluginMessages.UNKNOWN_USER.sendTo(sender, username);
-                    return;
-                }
-                query.addCondition("user", key.id());
-            }
-
-
-            query.setPageLimit((page - 1) * pageSize, pageSize);
-            query.orderBy("time", !PluginConfig.QUERY.REVERSE_ORDER.resolve());
-
-            List<Record> list = query.build().execute(sql -> {
-                ResultSet rs = sql.getResultSet();
-                List<Record> result = new ArrayList<>();
-
-                while (rs.next()) {
-                    long time = rs.getLong("time");
-                    long userId = rs.getLong("user");
-                    String message = rs.getString("message");
-                    result.add(new Record(time, data.getUser(UserKeyType.ID, userId), message));
-                }
-
-                return result;
-            }, new ArrayList<>(), null);
-
-            if (list.isEmpty()) {
-                if (page == 1) {
+            if (result.records().isEmpty()) {
+                if (result.page() == 1) {
                     PluginMessages.EMPTY.sendTo(sender);
                 } else {
-                    PluginMessages.EMPTY_PAGE.sendTo(sender, page);
+                    PluginMessages.EMPTY_PAGE.sendTo(sender, result.page());
                 }
             } else {
-                PluginMessages.COST.prepare((System.currentTimeMillis() - s1), list.size()).to(sender);
+                PluginMessages.COST.prepare(result.costMs(), result.count()).to(sender);
                 List<String> contents = new ArrayList<>();
-                for (Record record : list) {
+                for (QueryRecord record : result.records()) {
                     contents.addAll(PluginMessages.CONTENT.prepare(
                             TimeFormatUtils.datetime(record.time()),
-                            (record.user() == null ? "§c未知用户" : "§b" + record.user().name()).replace("$", "\\$"),
+                            ("§b" + record.playerName()).replace("$", "\\$"),
                             record.message().replace("$", "\\$")
                     ).parse(sender));
                 }
-                PluginMessages.PAGE.prepare(page).insert("content", contents).to(sender);
+                PluginMessages.PAGE.prepare(result.page()).insert("content", contents).to(sender);
             }
         });
         return null;
     }
 
-    record Record(long time, @Nullable UserKey user, String message) {
+    private Integer parsePage(String pageString) {
+        if (pageString == null) {
+            return 1;
+        }
+        try {
+            return Integer.parseInt(pageString);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
-
 
 }
