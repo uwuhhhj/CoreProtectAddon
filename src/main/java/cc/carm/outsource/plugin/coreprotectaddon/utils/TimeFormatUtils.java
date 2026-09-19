@@ -44,38 +44,30 @@ public class TimeFormatUtils {
     }
 
     public static @Nullable Duration parse(@NotNull String input) {
-        // 解析形如 "2h30m15s" 的字符串
-        long totalMillis = 0;
-        StringBuilder numberBuffer = new StringBuilder();
-        for (char c : input.toCharArray()) {
-            if (Character.isDigit(c)) {
-                numberBuffer.append(c);
-            } else {
-                if (numberBuffer.isEmpty()) {
-                    return null; // 无效格式
-                }
-                long number = Long.parseLong(numberBuffer.toString());
-                numberBuffer.setLength(0); // 清空缓冲区
-
-                switch (c) {
-                    case 'd' -> totalMillis += number * 24 * 60 * 60 * 1000L; // 天
-                    case 'h' -> totalMillis += number * 60 * 60 * 1000L;      // 小时
-                    case 'm' -> totalMillis += number * 60 * 1000L;           // 分钟
-                    case 's' -> totalMillis += number * 1000L;                // 秒
-                    default -> {
-                        return null; // 无效格式
-                    }
-                }
+        if (input.isEmpty()) return null;
+        var matcher = java.util.regex.Pattern.compile("([0-9]+(?:\\.[0-9]+)?)(mo|[ywdhms])")
+                .matcher(input.toLowerCase(java.util.Locale.ROOT));
+        java.math.BigDecimal seconds = java.math.BigDecimal.ZERO;
+        int end = 0;
+        try {
+            while (matcher.find()) {
+                if (matcher.start() != end) return null;
+                long multiplier = switch (matcher.group(2)) {
+                    case "y" -> 31536000; case "mo" -> 2592000; case "w" -> 604800;
+                    case "d" -> 86400; case "h" -> 3600; case "m" -> 60; default -> 1;
+                };
+                seconds = seconds.add(new java.math.BigDecimal(matcher.group(1)).multiply(java.math.BigDecimal.valueOf(multiplier)));
+                end = matcher.end();
             }
+            if (end != input.length()) return null;
+            return Duration.ofMillis(seconds.multiply(java.math.BigDecimal.valueOf(1000)).longValueExact());
+        } catch (ArithmeticException ex) {
+            return null;
         }
-        if (!numberBuffer.isEmpty()) {
-            return null; // 无效格式
-        }
-        return Duration.ofMillis(totalMillis);
     }
 
     public static @Nullable Duration[] parseInterval(@NotNull String input) {
-        String[] parts = input.split("-");
+        String[] parts = input.split("-", -1);
         if (parts.length > 2) {
             return null; // Invalid format, more than one '-'
         }

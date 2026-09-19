@@ -21,5 +21,6 @@ permissions:
 
 commands:
   coreprotectquery:
-    description: CoreProtectAddon 的查询功能指令。
+    description: COQ 独立 lookup 查询（/coq help）。
+    usage: /coq help
     aliases: [ coq ]

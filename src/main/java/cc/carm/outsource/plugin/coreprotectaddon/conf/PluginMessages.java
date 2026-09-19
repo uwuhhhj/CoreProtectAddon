@@ -9,12 +9,11 @@ import cc.carm.lib.mineconfiguration.bukkit.value.ConfiguredMessage;
 public interface PluginMessages extends Configuration {
 
     ConfiguredMessage<String> COMMAND_USAGE = ConfiguredMessage.asString().defaults(
-            "&e&lCoreProtectAddon &f查询命令帮助 &8(/coq)",
-            "&8#&f chat &6user:<玩家> time:<时间范围> page:<页码> content:<内容>",
-            "&8-&7 查询指定条件下的聊天记录。",
-            "&8#&f command &6user:<玩家> time:<时间范围> page:<页码> content:<内容>",
-            "&8-&7 查询指定条件下的聊天记录。",
-            "&f&o 内容支持SQL正则表达式匹配，时间范围格式形如 1mo2d3h4m5s 或 10d-30d 。"
+            "&3COQ &f查询命令帮助 &8(/coq help)",
+            "&f/coq l a:chat|command|item|container t:1d [u:玩家]",
+            "&f/coq l a:item i:iron_ingot e:diamond t:1d",
+            "&f/coq l <页码>[:每页条数]",
+            "&7聊天和命令支持 content: SQL 正则条件。完整帮助使用 /coq help。"
     ).build();
 
     ConfiguredMessage<String> NO_PERMISSION = ConfiguredMessage.asString().defaults(

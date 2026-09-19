@@ -47,8 +47,8 @@ public class Main extends EasyPlugin implements Listener {
     protected boolean initialize() {
 
         log("注册命令...");
-        registerCommand("coreprotectquery", new QueryCommands(this));
         if (getCommand("coreprotectquery") != null) {
+            getCommand("coreprotectquery").setExecutor(new QueryCommands(this));
             getCommand("coreprotectquery").setTabCompleter(new QueryTabCompleter());
         }
 
@@ -59,7 +59,7 @@ public class Main extends EasyPlugin implements Listener {
     protected void shutdown() {
 
         log("正在关闭数据库连接...");
-        this.dataManager.shutdown();
+        if (this.dataManager != null) this.dataManager.shutdown();
 
     }
 
