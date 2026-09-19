@@ -29,6 +29,7 @@ public final class LookupSessions {
         sessions.put(sender, session);
         return session;
     }
+    public void clear() { sessions.clear(); }
     public Session require(String sender) {
         Session session = sessions.get(sender);
         if (session == null) throw new QueryException("NO_QUERY", "没有最近的查询，请先使用 /coq l <参数>。");

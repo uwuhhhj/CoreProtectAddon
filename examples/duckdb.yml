@@ -1,0 +1,8 @@
+# 合并到 plugins/CoreProtectAddon/config.yml 顶层，修改后完整重启服务器。
+# 适用于当前提供的 CoreProtect-24.0-patched.jar，CoreProtect 自身须正在使用 DuckDB。
+database-type: duckdb
+
+# 无须填写文件路径、驱动、账号密码或表前缀。
+# Addon 从已启用的 CoreProtect 获取实际文件和前缀，校验文件位于其数据目录内。
+# 默认文件为 plugins/CoreProtect/database.duckdb，绝不会在 Addon 目录中另建文件。
+# 使用独立连接和 READ ONLY 事务；旧 database:、clickhouse-*、table-prefix 配置可保留。

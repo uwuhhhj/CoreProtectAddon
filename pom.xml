@@ -9,6 +9,7 @@
         <maven.compiler.target>${project.jdk.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.encoding>UTF-8</maven.compiler.encoding>
+        <coq.build.directory>${project.basedir}/target</coq.build.directory>
 
         <project.package>${project.groupId}.plugin.${project.artifactId}</project.package>
 
@@ -19,7 +20,7 @@
     </properties>
     <groupId>cc.carm.outsource</groupId>
     <artifactId>coreprotectaddon</artifactId>
-    <version>1.1.0</version>
+    <version>1.6.1</version>
 
     <name>CoreProtectAddon</name>
     <description>
@@ -114,6 +115,15 @@
 
     <dependencies>
 
+        <!-- Test the exact native driver used by the supplied CoreProtect build.
+             Production reuses CoreProtect's loaded driver and database instance. -->
+        <dependency>
+            <groupId>org.duckdb</groupId>
+            <artifactId>duckdb_jdbc</artifactId>
+            <version>1.4.5.0</version>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>cc.carm.lib</groupId>
             <artifactId>easyplugin-main</artifactId>
@@ -153,8 +163,18 @@
         <dependency>
             <groupId>net.coreprotect</groupId>
             <artifactId>coreprotect</artifactId>
-            <version>23.2</version>
+            <version>24.0</version>
             <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.clickhouse</groupId>
+            <artifactId>clickhouse-jdbc</artifactId>
+            <version>0.10.0</version>
+            <classifier>all</classifier>
+            <exclusions>
+                <exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
@@ -205,6 +225,7 @@
     </profiles>
 
     <build>
+        <directory>${coq.build.directory}</directory>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -284,6 +305,10 @@
                     <createDependencyReducedPom>false</createDependencyReducedPom>
                     <relocations>
                         <relocation>
+                            <pattern>com.clickhouse</pattern>
+                            <shadedPattern>${project.package}.lib.clickhouse</shadedPattern>
+                        </relocation>
+                        <relocation>
                             <pattern>com.cryptomorin.xseries</pattern>
                             <shadedPattern>${project.package}.lib.xseries</shadedPattern>
                         </relocation>
@@ -296,12 +321,18 @@
                             <shadedPattern>${project.package}.lib.slf4j</shadedPattern>
                         </relocation>
                     </relocations>
+                    <transformers>
+                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                    </transformers>
                     <filters>
                         <filter>
                             <artifact>*:*</artifact>
                             <excludes>
                                 <exclude>META-INF/MANIFEST.MF</exclude>
                                 <exclude>META-INF/*.txt</exclude>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
                             </excludes>
                         </filter>
                     </filters>

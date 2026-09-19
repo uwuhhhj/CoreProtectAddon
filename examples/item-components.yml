@@ -1,0 +1,31 @@
+# 合并到 plugins/CoreProtectAddon/config.yml，已有 query: 时合并其中的键，不要重复定义 query。
+# 修改后 /coq reload。白名单控制面板输出、content: 补全和省略路径的嵌套字符串值搜索。
+# 显式组件条件与 debug 全部组件输出不受白名单限制。
+item-panel:
+  component-whitelist:
+    - minecraft:custom_name
+    - minecraft:lore
+    - minecraft:potion_contents
+    - minecraft:custom_model_data
+    - minecraft:custom_data
+    - minecraft:map_id
+    # 可按需加入默认组件：
+    # - minecraft:max_stack_size
+    # - minecraft:rarity
+  component-preview-length: 100
+query:
+  component-max-candidates: 2000
+  timeout-seconds: 5
+
+# 点击组件行会复制完整 {"组件ID":值}，直接粘贴到 content: 后：
+# /coq l a:item i:potion t:1h content:{"minecraft:max_stack_size":1}
+# /coq l a:item i:potion t:1h content:{"minecraft:max_stack_size":1,"minecraft:rarity":"common"}
+# 值为完整匹配；多个组件全部匹配；白名单外的组件同样支持。
+# 只匹配物品类型：content:"minecraft:filled_map"
+# 省略路径：content:"smc:dou_dizhu_table"（递归匹配白名单组件内的完整字符串值，含嵌套对象/列表）
+# 示例路径 custom_data -> craftengine:id -> "smc:dou_dizhu_table"；不写死字段名，也支持其他插件数据结构。
+# 只判断组件存在：content:"minecraft:map_id"
+# 指定组件值：content:map_id=101205（也支持 content:"minecraft:map_id"=101205）
+# 类型 + 精确组件值：content:"minecraft:filled_map[map_id=101205]"
+# 查看主手全部组件：/coq debug item [页码]（权限 coreprotectaddon.command.debug，默认 OP）
+# debug 每行的加入/移出白名单按钮会保存到此配置并立即生效；另需 coreprotectaddon.command.reload 权限。

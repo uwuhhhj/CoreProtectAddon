@@ -43,6 +43,11 @@ public class SqlIntegrationTest {
             create(s, "command", base + "message VARCHAR(16000)");
             create(s, "item", base + "type INT, data BLOB, amount INT, action TINYINT, rolled_back TINYINT");
             create(s, "container", base + "type INT, data INT, amount INT, metadata BLOB, action TINYINT, rolled_back TINYINT");
+            create(s, "block", base + "type INT,data INT,action TINYINT,rolled_back TINYINT");
+            create(s, "entity_map", "rowid INT PRIMARY KEY,id INT,entity VARCHAR(255)");
+            create(s, "session", base + "action TINYINT");
+            create(s, "sign", base + "action TINYINT,face TINYINT,line_1 VARCHAR(255),line_2 VARCHAR(255),line_3 VARCHAR(255),line_4 VARCHAR(255),line_5 VARCHAR(255),line_6 VARCHAR(255),line_7 VARCHAR(255),line_8 VARCHAR(255)");
+            create(s, "username_log", "rowid INT PRIMARY KEY,time INT,uuid VARCHAR(64),user VARCHAR(100)");
             s.executeUpdate("INSERT INTO " + tables.users() + " VALUES (1,0,'Steve',NULL),(2,0,'Alex',NULL)");
             // Dictionary rowid deliberately differs from id to detect incorrect material/world joins.
             s.executeUpdate("INSERT INTO " + tables.materials() + " VALUES (1,101,'minecraft:iron_ingot'),(2,202,'minecraft:diamond')");
@@ -66,7 +71,7 @@ public class SqlIntegrationTest {
     }
     private static void create(Statement s, String name, String definition) throws SQLException {
         String table = prefix + name;
-        String index = name.equals("material_map") || name.equals("world") ? "" : ", INDEX(time)";
+        String index = name.endsWith("_map") || name.equals("world") ? "" : ", INDEX(time)";
         s.executeUpdate("CREATE TABLE " + table + " (" + definition + index + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         ownedTables.add(table);
     }
@@ -82,6 +87,27 @@ public class SqlIntegrationTest {
         }
     }
     private static CoreProtectQueryService service(QueryLimits limits) { return new CoreProtectQueryService(source, () -> tables, () -> limits); }
+    @Test public void mixedQueriesSpatialBoundsAndSpecialSchemasExecuteOnServer() throws Exception {
+        try(Connection c=source.getConnection();Statement s=c.createStatement()) {
+            s.executeUpdate("INSERT INTO "+tables.block()+" VALUES(1,"+(anchor-10)+",1,42,10,64,20,101,0,1,0)");
+            s.executeUpdate("INSERT INTO "+tables.session()+" VALUES(1,"+(anchor-10)+",1,42,10,64,20,1)");
+            s.executeUpdate("INSERT INTO "+tables.sign()+" VALUES(1,"+(anchor-10)+",1,42,10,64,20,1,1,'front','','','','back','hello','','')");
+            s.executeUpdate("INSERT INTO "+tables.username()+" VALUES(1,"+(anchor-10)+",'uuid-fixture','OldSteve')");
+        }
+        try {
+            LookupRequest request=request("t:1d rows:100").withOptions(LookupOptions.DEFAULT.resolved(new SpatialBounds("fixture_world",10,10,64,64,20,20)));
+            LookupResult result=service(LIMITS).lookup(request,anchor);
+            assertTrue(result.message(),result.success());assertEquals(13,result.total());
+            assertEquals("block",result.records().get(0).source());
+            assertEquals(1,lookup("a:+session t:1d").total());
+            LookupResult sign=lookup("a:sign t:1d content:hello");assertTrue(sign.message(),sign.success());assertTrue(sign.records().get(0).message().startsWith("back hello"));
+            assertEquals("OldSteve",lookup("a:username t:1d").records().get(0).playerName());
+        } finally {
+            try(Connection c=source.getConnection();Statement s=c.createStatement()) {
+                for(String table:List.of(tables.block(),tables.session(),tables.sign(),tables.username()))s.executeUpdate("DELETE FROM "+table);
+            }
+        }
+    }
     private static LookupRequest request(String args) { return LookupParameters.parse(("l " + args).split(" ")).request(); }
     private static LookupResult lookup(String args) { return service(LIMITS).lookup(request(args), anchor); }
     private static void ids(LookupResult result, Long... expected) {

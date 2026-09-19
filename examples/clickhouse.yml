@@ -1,0 +1,11 @@
+# 将此片段合并到 plugins/CoreProtectAddon/config.yml 顶层。
+# 保留原有 database: 配置，便于切回 MySQL/MariaDB。修改后重启服务器。
+# 数据库和兼容视图必须已由支持 ClickHouse 的 CoreProtect 创建。
+database-type: clickhouse
+table-prefix: co_
+clickhouse-host: clickhouse
+clickhouse-port: 8123
+clickhouse-database: test
+clickhouse-username: test
+clickhouse-password: '替换为实际密码'
+clickhouse-tls: false

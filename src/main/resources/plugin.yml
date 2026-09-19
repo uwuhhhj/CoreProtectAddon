@@ -13,8 +13,16 @@ api-version: 1.16
 
 softdepend:
   - CoreProtect
+  - WorldEdit
+  - FastAsyncWorldEdit
 
 permissions:
+  coreprotectaddon.command.debug:
+    description: 允许分行查看和复制主手物品的全部有效组件。
+    default: op
+  coreprotectaddon.command.reload:
+    description: 允许重载 COQ 配置与数据库连接，以及保存组件白名单修改。
+    default: op
   coreprotectaddon.command.query:
     description: 允许使用查询命令。
     default: op
