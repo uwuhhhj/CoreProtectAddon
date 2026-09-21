@@ -14,6 +14,7 @@ import java.util.logging.Logger;
 
 /** Independent, read-only CoreProtect SQL queries. Never dispatches a CoreProtect command. */
 public class CoreProtectQueryService {
+    private static final java.util.concurrent.Semaphore ACTIVE_QUERIES = new java.util.concurrent.Semaphore(2);
     public static final String ERROR_INVALID_QUERY_TYPE = "INVALID_QUERY_TYPE";
     public static final String ERROR_INVALID_TIME = "INVALID_TIME";
     public static final String ERROR_INVALID_PAGE = "INVALID_PAGE";
@@ -28,8 +29,8 @@ public class CoreProtectQueryService {
     private Supplier<Integer> componentMaxCandidates = () -> 2000;
 
     public CoreProtectQueryService(DataManager manager) {
-        this(manager.dataSource(), manager::tables, QueryLimits::configured);
-        componentMaxCandidates = PluginConfig.QUERY.COMPONENT_MAX_CANDIDATES::getNotNull;
+        this(manager.dataSource(), manager::tables, manager::queryLimits);
+        componentMaxCandidates = manager::componentMaxCandidates;
     }
 
     public void setComponentMatcher(ComponentMatcher matcher) { this.componentMatcher = Objects.requireNonNull(matcher); }
@@ -93,10 +94,20 @@ public class CoreProtectQueryService {
 
     /** Anchor is fixed for a sender's pagination session. Component searches load bounded candidate batches. */
     public LookupResult lookup(LookupRequest request, long anchor) {
+        return lookup(request,anchor,new QueryCancellation(limits.get().timeoutSeconds()));
+    }
+
+    public LookupResult lookup(LookupRequest request, long anchor, QueryCancellation cancellation) {
         long started = System.nanoTime();
         int page = request.page() == null ? 1 : request.page();
         int size = request.pageSize() == null ? 15 : request.pageSize();
+        boolean acquired = false;
         try {
+            if (org.bukkit.Bukkit.getServer() != null && org.bukkit.Bukkit.isPrimaryThread())
+                throw new QueryException("ASYNC_REQUIRED","数据库查询必须在工作线程执行。");
+            cancellation.check();
+            if (!(acquired = ACTIVE_QUERIES.tryAcquire()))
+                throw new QueryException("QUERY_BUSY","数据库查询繁忙，请稍后重试。");
             QueryLimits rules = limits.get();
             size = rules.pageSize(request.pageSize());
             int offset = rules.offset(page, size);
@@ -104,7 +115,8 @@ public class CoreProtectQueryService {
             long[] window = rules.window(request.time(), anchor);
             Tables names = tables.get();
             try (Connection connection = dataSource.getConnection()) {
-                TimedSelect sql = new TimedSelect(connection, started + rules.timeoutSeconds() * 1_000_000_000L);
+                cancellation.check();
+                TimedSelect sql = new TimedSelect(connection, cancellation);
                 return new LookupPlan(sql,names,request,rules,window,componentMatcher,componentMaxCandidates.get())
                         .execute(page,size,offset,started);
             }
@@ -118,6 +130,8 @@ public class CoreProtectQueryService {
         } catch (RuntimeException ex) {
             Logger.getLogger("CoreProtectAddon").warning("Lookup failed: " + ex.getClass().getSimpleName());
             return LookupResult.failure(request.action(), ERROR_QUERY_FAILED, "查询失败，请检查配置与日志。", page, size, elapsed(started));
+        } finally {
+            if (acquired) ACTIVE_QUERIES.release();
         }
     }
 
@@ -160,12 +174,20 @@ public class CoreProtectQueryService {
     static final class TimedSelect {
         private final Connection connection;
         final long deadline;
+        private final QueryCancellation cancellation;
         private final boolean maria;
         final boolean clickhouse;
         final boolean duckdb;
         TimedSelect(Connection connection, long deadline) throws SQLException {
+            this(connection,deadline,null);
+        }
+        TimedSelect(Connection connection, QueryCancellation cancellation) throws SQLException {
+            this(connection,cancellation.deadline(),cancellation);
+        }
+        private TimedSelect(Connection connection, long deadline, QueryCancellation cancellation) throws SQLException {
             this.connection = connection;
             this.deadline = deadline;
+            this.cancellation = cancellation;
             DatabaseMetaData meta = connection.getMetaData();
             String product = meta.getDatabaseProductName().toLowerCase(Locale.ROOT);
             this.clickhouse = product.contains("clickhouse");
@@ -173,6 +195,7 @@ public class CoreProtectQueryService {
             this.maria = !clickhouse && !duckdb && (product + " " + meta.getDatabaseProductVersion()).toLowerCase(Locale.ROOT).contains("mariadb");
         }
         <T> T read(String query, List<?> params, Rows<T> reader) throws SQLException {
+            if (cancellation != null) cancellation.check();
             long remaining = (deadline - System.nanoTime()) / 1_000_000;
             if (remaining < 1) throw new SQLTimeoutException("Query deadline expired");
             // Backticks occur only in generated identifiers; user strings are bound after SQL preparation.
@@ -187,6 +210,7 @@ public class CoreProtectQueryService {
                 if (!statement.execute()) throw new SQLException("Lookup did not return a result set");
                 try (ResultSet rs = statement.getResultSet()) {
                     T result = reader.read(rs);
+                    if (cancellation != null) cancellation.check();
                     if (System.nanoTime() >= deadline) throw new SQLTimeoutException("Query deadline expired");
                     return result;
                 }

@@ -23,6 +23,16 @@ final class ItemPanelDetails {
     }
 
     static List<Component> describe(LookupRecord row,LookupResult result,ItemStack item,List<String> whitelist,int previewLength) {
+        List<String> keys = keys(whitelist);
+        Map<String,Object> values = item == null || keys.isEmpty() ? Map.of() : ItemComponents.values(item,new LinkedHashSet<>(keys));
+        return describeValues(row,result,values,item != null,keys,previewLength);
+    }
+    static List<String> keys(List<String> whitelist) {
+        return whitelist.stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().limit(12).toList();
+    }
+    /** Pure text formatting of privately owned encoded component values; safe on a worker. */
+    static List<Component> describeValues(LookupRecord row,LookupResult result,Map<String,Object> values,
+            boolean restored,List<String> keys,int previewLength) {
         List<Component> lines = new ArrayList<>();
         lines.add(LookupRenderer.notice("记录 #" + row.rowId() + " · " + row.playerName() + " · "
                 + LookupRenderer.actionText(result.action(),row.action()) + " · " + row.material() + " × " + row.amount()));
@@ -35,11 +45,9 @@ final class ItemPanelDetails {
         lines.add(location);
         lines.add(Component.text("a:" + result.action().id() + " · 第 " + result.page() + "/" + result.totalPages()
                 + " 页 · 点击组件行复制完整条件，粘贴到 content: 后",NamedTextColor.GRAY));
-        if (item == null) { lines.add(LookupRenderer.notice("历史元数据无法还原，不能提供可靠组件条件。")); return lines; }
-        List<String> keys = whitelist.stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().limit(12).toList();
+        if (!restored) { lines.add(LookupRenderer.notice("历史元数据无法还原，不能提供可靠组件条件。")); return lines; }
         if (keys.isEmpty()) return lines;
         try {
-            Map<String,Object> values = ItemComponents.values(item,new LinkedHashSet<>(keys));
             for (String key : keys) if (values.containsKey(key)) {
                 String condition = ItemComponents.condition(key,values.get(key));
                 String preview = values.get(key).toString().replace('\n',' ').replace('\r',' ').replace("§","\\u00a7");

@@ -12,6 +12,12 @@ import java.nio.file.Files;
 import static org.junit.Assert.*;
 
 public class DatabaseConfigurationTest {
+    @Test public void missingNetworkTimeoutsAreBoundedWithoutOverwritingExplicitSettings() {
+        assertEquals("jdbc:mysql://localhost/test?sslMode=DISABLED&connectTimeout=5000&socketTimeout=5000",
+                DataManager.boundedJdbc("jdbc:mysql://localhost/test?sslMode=DISABLED",5));
+        assertEquals("jdbc:mysql://localhost/test?connectTimeout=2000&socketTimeout=3000",
+                DataManager.boundedJdbc("jdbc:mysql://localhost/test?connectTimeout=2000&socketTimeout=3000",5));
+    }
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
     @Test public void oldConfigKeepsItsConnectionAndTableNamesWhileNewKeysRoundTrip() throws Exception {

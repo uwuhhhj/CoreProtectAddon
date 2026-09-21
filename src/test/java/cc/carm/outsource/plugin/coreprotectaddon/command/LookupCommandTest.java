@@ -79,7 +79,8 @@ public class LookupCommandTest {
         rejects("INVALID_PARAMETER", () -> parse("l a:item t:1d time:1h"));
         rejects("INVALID_PARAMETER", () -> parse("l a:item t:1d i:stone,,dirt"));
         rejects("INCOMPATIBLE_PARAMETER", () -> parse("l a:chat t:1d i:diamond"));
-        rejects("INVALID_COMPONENT_CONTENT", () -> parse("l a:item t:1d content:test"));
+        assertEquals("test",parse("l a:item t:1d content:test").request().content());
+        rejects("INVALID_COMPONENT_CONTENT", () -> parse("l a:item t:1d content:map_id="));
     }
     @Test public void componentsAreExplicitlyRejectedEvenWithSpaces() {
         rejects("UNSUPPORTED_COMPONENTS", () -> parse("l a:item t:1d i:minecraft:iron_ingot[custom_name={extra: [\"1\"], text: \"\"}]"));

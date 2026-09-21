@@ -26,7 +26,7 @@ final class ItemPreparationQueue implements AutoCloseable {
     private final ArrayDeque<Job> jobs = new ArrayDeque<>();
     private BukkitTask task;
     private volatile boolean closed;
-    private final java.util.Set<CompletableFuture<BitSet>> searches = ConcurrentHashMap.newKeySet();
+    private final java.util.Set<CompletableFuture<?>> searches = ConcurrentHashMap.newKeySet();
 
     record Prepared(ItemStack item, HoverEvent<?> hover) { }
 
@@ -47,42 +47,76 @@ final class ItemPreparationQueue implements AutoCloseable {
         return job;
     }
 
-    /** Called only by a query worker. Waiting does not block the server thread. */
-    BitSet match(List<LookupRecord> records,String content,long deadline) {
-        if (org.bukkit.Bukkit.isPrimaryThread()) throw new QueryException("ASYNC_REQUIRED","组件查询必须在异步线程执行。");
-        CompletableFuture<BitSet> answer = new CompletableFuture<>();
+    cc.carm.outsource.plugin.coreprotectaddon.service.ComponentMatcher matcher() {
+        return new cc.carm.outsource.plugin.coreprotectaddon.service.ComponentMatcher() {
+            @Override public BitSet match(List<LookupRecord> rows,String content,long deadline) {
+                return prepare(content,deadline).match(rows,content,deadline);
+            }
+            @Override public cc.carm.outsource.plugin.coreprotectaddon.service.ComponentMatcher prepare(String content,long deadline) {
+                var compiled = awaitMain(() -> cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.parse(content)
+                        .compileSnapshot(cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy()),deadline);
+                return (rows,ignored,end) -> matchSnapshots(rows,compiled,end);
+            }
+        };
+    }
+
+    /** Compatibility entry point for runtime probes. A real query prepares its predicate once. */
+    BitSet match(List<LookupRecord> rows,String content,long deadline) { return matcher().match(rows,content,deadline); }
+
+    private BitSet matchSnapshots(List<LookupRecord> records,
+            cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.Compiled compiled,long deadline) {
+        CompletableFuture<List<cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.Snapshot>> answer = new CompletableFuture<>();
         searches.add(answer);
         try {
-            if (closed) throw new QueryException("QUERY_CANCELLED","插件正在停用。");
             plugin.getServer().getScheduler().runTask(plugin, () -> {
                 if (answer.isDone() || closed) return;
-                try {
-                    var expected = cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.parse(content).compile();
-                    if (records.isEmpty()) { answer.complete(new BitSet()); return; }
-                    BitSet matches = new BitSet(records.size());
-                    int[] index = {0};
-                    submit(records, () -> !answer.isDone() && !closed && System.nanoTime() < deadline, (record, prepared) -> {
-                        if (answer.isDone()) return;
-                        try {
-                            if (prepared.item() == null) throw new QueryException("COMPONENT_DECODE_FAILED",
-                                    "候选记录 #" + record.rowId() + " 的历史组件无法还原；请缩小查询范围。");
-                            if (expected.test(prepared.item())) matches.set(index[0]);
-                            index[0]++;
-                        } catch (RuntimeException ex) { answer.completeExceptionally(ex); }
-                    }, () -> answer.complete(matches),false);
-                } catch (RuntimeException | LinkageError ex) { answer.completeExceptionally(ex); }
+                if (records.isEmpty()) { answer.complete(List.of()); return; }
+                var snapshots = new java.util.ArrayList<cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.Snapshot>();
+                submit(records, () -> !answer.isDone() && !closed && System.nanoTime() < deadline, (record,prepared) -> {
+                    try {
+                        if (prepared.item() == null) throw new QueryException("COMPONENT_DECODE_FAILED",
+                                "候选记录 #" + record.rowId() + " 的历史组件无法还原。");
+                        snapshots.add(compiled.capture(prepared.item()));
+                    } catch (RuntimeException | LinkageError ex) { answer.completeExceptionally(ex); }
+                }, () -> answer.complete(List.copyOf(snapshots)),false);
             });
-            long remaining = deadline-System.nanoTime();
-            if (remaining <= 0) throw new TimeoutException();
-            return answer.get(remaining,TimeUnit.NANOSECONDS);
-        } catch (InterruptedException ex) {
+            var snapshots = await(answer,deadline);
+            BitSet result = new BitSet(snapshots.size());
+            for (int i=0;i<snapshots.size();i++) {
+                checkWorker(deadline);
+                if (compiled.test(snapshots.get(i))) result.set(i);
+            }
+            return result;
+        } finally { answer.cancel(false); searches.remove(answer); }
+    }
+
+    private <T> T awaitMain(Callable<T> work,long deadline) {
+        checkWorker(deadline);
+        CompletableFuture<T> answer = new CompletableFuture<>(); searches.add(answer);
+        try {
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                if (answer.isDone() || closed || System.nanoTime() >= deadline) return;
+                try { answer.complete(work.call()); }
+                catch (Exception | LinkageError ex) { answer.completeExceptionally(ex); }
+            });
+            return await(answer,deadline);
+        } finally { answer.cancel(false); searches.remove(answer); }
+    }
+    private void checkWorker(long deadline) {
+        if (org.bukkit.Bukkit.isPrimaryThread()) throw new QueryException("ASYNC_REQUIRED","组件查询必须在异步线程执行。");
+        if (closed || Thread.currentThread().isInterrupted()) throw new QueryException("QUERY_CANCELLED","查询已取消。");
+        if (System.nanoTime() >= deadline) throw new QueryException("QUERY_TIMEOUT","组件查询超时，搜索未完成。");
+    }
+    private <T> T await(CompletableFuture<T> answer,long deadline) {
+        checkWorker(deadline);
+        try { return answer.get(Math.max(1,deadline-System.nanoTime()),TimeUnit.NANOSECONDS); }
+        catch (InterruptedException ex) {
             Thread.currentThread().interrupt(); throw new QueryException("QUERY_CANCELLED","组件查询已取消。");
-        } catch (TimeoutException ex) {
-            throw new QueryException("QUERY_TIMEOUT","组件查询超时，请缩小时间范围或增加玩家、物品条件。");
-        } catch (ExecutionException ex) {
+        } catch (TimeoutException ex) { throw new QueryException("QUERY_TIMEOUT","组件查询超时，搜索未完成。"); }
+        catch (ExecutionException ex) {
             if (ex.getCause() instanceof QueryException query) throw query;
             throw new QueryException("COMPONENT_UNAVAILABLE","无法解析历史物品组件。");
-        } finally { answer.cancel(false); searches.remove(answer); }
+        }
     }
 
     private void tick() {

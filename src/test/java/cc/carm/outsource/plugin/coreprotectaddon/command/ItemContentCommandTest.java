@@ -20,12 +20,13 @@ public class ItemContentCommandTest {
         assertEquals(Set.of("minecraft:map_id","minecraft:custom_data"),parsed.present());
         assertTrue(parsed.compound().contains("\"minecraft:map_id\":101205"));
         assertNull(ItemContent.parse("minecraft:filled_map[map_id]").compound());
-        for (String bad : List.of("test","minecraft:filled_map[map_id=]","minecraft:filled_map[map_id=1,]",
+        assertEquals("test",ItemContent.parse("test").valueSearch());
+        for (String bad : List.of("minecraft:filled_map[map_id=]","minecraft:filled_map[map_id=1,]",
                 "minecraft:filled_map[map_id=1,map_id=2]","minecraft:filled_map[custom_data={a:1]]"))
             assertThrows(bad,QueryException.class,() -> ItemContent.parse(bad));
     }
     @Test public void completionUsesCurrentWhitelistAndPreservesQuotes() {
-        List<String> keys = List.of("minecraft:map_id","minecraft:lore"," bad ","minecraft:map_id");
+        List<String> keys = List.of("minecraft:map_id","minecraft:lore","bad key","minecraft:map_id");
         assertEquals(List.of("content:\"minecraft:map_id\"","content:\"minecraft:lore\""),
                 complete(keys,"lookup","a:item","content:\""));
         assertEquals(List.of("c:'minecraft:map_id'"),complete(keys,"lookup","a:item","c:'minecraft:ma"));

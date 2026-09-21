@@ -25,17 +25,29 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
     private final JavaPlugin plugin;
     private final LookupSessions sessions;
     private final ItemPreparationQueue preparation;
-    private final BiFunction<LookupRequest, Long, LookupResult> lookup;
+    @FunctionalInterface interface QueryLookup {
+        LookupResult run(LookupRequest request,long anchor,cc.carm.outsource.plugin.coreprotectaddon.service.QueryCancellation cancellation);
+    }
+    private final QueryLookup lookup;
+    private final cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool tasks;
+    private boolean ownsTasks;
     private final Map<UUID, Panel> panels = new HashMap<>();
 
     ItemLookupPanel(JavaPlugin plugin, LookupSessions sessions, ItemPreparationQueue preparation,
                     BiFunction<LookupRequest, Long, LookupResult> lookup) {
-        this.plugin = plugin; this.sessions = sessions; this.preparation = preparation; this.lookup = lookup;
+        this(plugin,sessions,preparation,(request,anchor,cancellation) -> lookup.apply(request,anchor),
+                new cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool());
+        ownsTasks = true;
+    }
+    ItemLookupPanel(JavaPlugin plugin,LookupSessions sessions,ItemPreparationQueue preparation,QueryLookup lookup,
+            cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool tasks) {
+        this.plugin = plugin; this.sessions = sessions; this.preparation = preparation; this.lookup = lookup; this.tasks = tasks;
         plugin.getServer().getPluginManager().registerEvents(this,plugin);
     }
 
     void open(Player player, LookupSessions.Session session) {
         validate(session.request());
+        if (tasks.busy(QueryCommands.senderKey(player))) throw new QueryException("QUERY_BUSY","上一条查询仍在结束，请稍候。");
         close(player);
         Panel panel = new Panel(player,session);
         panels.put(player.getUniqueId(),panel);
@@ -62,8 +74,10 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
         controls(panel,"正在异步查询第 " + page + " 页…");
         LookupRequest request = panel.session.request().withPage(page,panel.session.request().pageSize());
         try {
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                LookupResult result = lookup.apply(request,panel.session.anchor());
+            panel.query = tasks.submit(QueryCommands.senderKey(panel.player),
+                    cc.carm.outsource.plugin.coreprotectaddon.service.QueryLimits.configured().timeoutSeconds(),
+                    cancellation -> lookup.run(request,panel.session.anchor(),cancellation), (queried,failure) -> {
+                LookupResult result = failure == null ? queried : QueryCommands.failed(request,failure);
                 if (!plugin.isEnabled()) return;
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     if (!live(panel)) return; // Closing, quitting or replacing a panel invalidates late completions.
@@ -93,7 +107,7 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
                 });
             });
         } catch (RuntimeException ex) {
-            panel.busy = false; controls(panel,"无法开始查询，请重试。");
+            panel.busy = false; controls(panel,ex instanceof QueryException ? ex.getMessage() : "无法开始查询，请重试。");
             plugin.getLogger().warning("Unable to load item panel: " + ex.getClass().getSimpleName());
         }
     }
@@ -129,7 +143,7 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
         int slot = event.getRawSlot();
         if (event.getClick() != ClickType.LEFT && event.getClick() != ClickType.RIGHT) return;
         if (slot == panel.contentSlots+7) { closeView(panel); return; }
-        if (panel.busy || System.nanoTime()-panel.lastClick < 250_000_000L) return;
+        if (panel.busy || panel.detailsBusy || System.nanoTime()-panel.lastClick < 250_000_000L) return;
         panel.lastClick = System.nanoTime();
         if (panel.result == null) return;
         if (slot == panel.contentSlots && panel.result.page() > 1) load(panel,panel.result.page()-1);
@@ -154,10 +168,31 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
         }
         else if (slot >= 0 && slot < panel.result.records().size() && panel.detailsJob == null) {
             LookupResult selected = panel.result;
+            panel.detailsBusy = true;
             panel.detailsJob = preparation.submitAction(() -> live(panel) && panel.result == selected, () -> {
                 panel.detailsJob = null;
-                ItemPanelDetails.describe(selected.records().get(slot),selected,panel.session,panel.items[slot])
-                        .forEach(line -> LookupRenderer.send(panel.player,line));
+                try {
+                    var keys = ItemPanelDetails.keys(cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy());
+                    int preview = cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig.ITEM_PANEL.COMPONENT_PREVIEW_LENGTH.getNotNull();
+                    boolean restored = panel.items[slot] != null;
+                    var values = !restored || keys.isEmpty() ? Map.<String,Object>of()
+                            : cc.carm.outsource.plugin.coreprotectaddon.service.ItemComponents.values(panel.items[slot],new LinkedHashSet<>(keys));
+                    panel.detailsQuery = tasks.submit("details:"+panel.player.getUniqueId(),5,cancellation -> {
+                        cancellation.check();
+                        return ItemPanelDetails.describeValues(selected.records().get(slot),selected,values,restored,keys,preview);
+                    },(lines,failure) -> {
+                        if (!plugin.isEnabled()) return;
+                        Bukkit.getScheduler().runTask(plugin,() -> {
+                            panel.detailsBusy = false;
+                            if (!live(panel) || panel.result != selected) return;
+                            if (failure == null) lines.forEach(line -> LookupRenderer.send(panel.player,line));
+                            else message(panel,"详情处理失败或超时，请稍后重试。");
+                        });
+                    });
+                } catch (RuntimeException ex) {
+                    panel.detailsBusy = false;
+                    message(panel,ex instanceof QueryException ? ex.getMessage() : "无法读取物品组件。");
+                }
             });
         }
     }
@@ -190,6 +225,8 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
     private void dispose(Panel panel) {
         if (panel.closed) return;
         panel.closed = true;
+        if (panel.query != null) panel.query.cancel();
+        if (panel.detailsQuery != null) panel.detailsQuery.cancel();
         panels.remove(panel.player.getUniqueId(),panel);
         if (panel.job != null) { panel.job.cancel(); panel.job = null; }
         if (panel.detailsJob != null) { panel.detailsJob.cancel(); panel.detailsJob = null; }
@@ -198,6 +235,7 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
     @Override public void close() {
         new ArrayList<>(panels.values()).forEach(p -> close(p.player));
         org.bukkit.event.HandlerList.unregisterAll(this);
+        if (ownsTasks) tasks.close();
     }
 
     private static final class Panel implements InventoryHolder {
@@ -207,9 +245,11 @@ final class ItemLookupPanel implements Listener, AutoCloseable {
         final ItemStack[] items;
         LookupSessions.Session session;
         LookupResult result;
+        cc.carm.outsource.plugin.coreprotectaddon.service.QueryCancellation query;
         ItemPreparationQueue.Job job;
         ItemPreparationQueue.Job detailsJob;
-        boolean busy,closed;
+        boolean busy,closed,detailsBusy;
+        cc.carm.outsource.plugin.coreprotectaddon.service.QueryCancellation detailsQuery;
         int prepared;
         long lastClick;
         Panel(Player player,LookupSessions.Session session) {

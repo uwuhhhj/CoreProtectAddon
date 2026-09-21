@@ -13,8 +13,13 @@ import java.util.*;
 import static net.kyori.adventure.text.format.NamedTextColor.*;
 
 final class ItemDebug {
-    private ItemDebug() { }
-    static void execute(Main plugin,CommandSender sender,String[] args) {
+    private final Main plugin;
+    private final ItemPreparationQueue preparation;
+    private final Set<UUID> pending = new HashSet<>();
+    private volatile boolean closed;
+    ItemDebug(Main plugin,ItemPreparationQueue preparation) { this.plugin = plugin; this.preparation = preparation; }
+    void close() { closed = true; pending.forEach(id -> plugin.queryTasks().cancel("debug:"+id)); pending.clear(); }
+    void execute(CommandSender sender,String[] args) {
         if (!sender.hasPermission("coreprotectaddon.command.debug")) {
             LookupRenderer.send(sender,LookupRenderer.notice("你没有查看手持物品组件的权限。")); return;
         }
@@ -29,13 +34,41 @@ final class ItemDebug {
                 try { page = Integer.parseInt(args[2]); } catch (NumberFormatException ex) { throw usage(); }
             }
             if (!(sender instanceof Player player)) throw new QueryException("PLAYER_ONLY","请在游戏内手持物品后执行 /coq debug item。");
-            var item = player.getInventory().getItemInMainHand();
-            if (item.getType().isAir()) throw new QueryException("EMPTY_HAND","主手没有物品。");
-            Set<String> keys = new TreeSet<>();
-            item.getDataTypes().forEach(type -> keys.add(type.getKey().toString()));
-            describe(item.getType().getKey().toString(),ItemComponents.values(item,keys),page,
-                    sender.hasPermission("coreprotectaddon.command.reload"),new HashSet<>(PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy()))
-                    .forEach(line -> LookupRenderer.send(sender,line));
+            UUID id = player.getUniqueId();
+            if (!pending.add(id)) throw new QueryException("QUERY_BUSY","上一条物品详情仍在处理，请稍候。");
+            final int selectedPage = page;
+            preparation.submitAction(() -> {
+                if (closed || !player.isOnline()) { pending.remove(id); return false; }
+                return true;
+            },() -> {
+                try {
+                    var item = player.getInventory().getItemInMainHand();
+                    if (item.getType().isAir()) throw new QueryException("EMPTY_HAND","主手没有物品。");
+                    Set<String> keys = new TreeSet<>();
+                    item.getDataTypes().forEach(type -> keys.add(type.getKey().toString()));
+                    int pages = Math.max(1,(keys.size()+9)/10);
+                    if (selectedPage < 1 || selectedPage > pages) throw new QueryException("INVALID_PAGE","组件页码应为 1–"+pages+"。");
+                    Set<String> selected = new LinkedHashSet<>(keys.stream().skip((selectedPage-1L)*10).limit(10).toList());
+                    var values = ItemComponents.values(item,selected);
+                    String material = item.getType().getKey().toString();
+                    boolean manage = player.hasPermission("coreprotectaddon.command.reload");
+                    var whitelist = Set.copyOf(PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy());
+                    plugin.queryTasks().submit("debug:"+id,5,cancellation -> {
+                        cancellation.check();
+                        return describePage(material,values,selectedPage,keys.size(),manage,whitelist);
+                    },(lines,failure) -> {
+                        if (closed || !plugin.isEnabled()) return;
+                        plugin.getServer().getScheduler().runTask(plugin,() -> {
+                            pending.remove(id);
+                            if (closed || !player.isOnline()) return;
+                            if (failure == null) lines.forEach(line -> LookupRenderer.send(player,line));
+                            else LookupRenderer.send(player,LookupRenderer.notice("物品详情处理失败或超时，请稍后重试。"));
+                        });
+                    });
+                } catch (RuntimeException ex) {
+                    pending.remove(id); LookupRenderer.send(player,LookupRenderer.notice(ex instanceof QueryException ? ex.getMessage() : "无法读取物品详情。"));
+                }
+            });
         } catch (QueryException ex) { LookupRenderer.send(sender,LookupRenderer.notice(ex.getMessage())); }
     }
 
@@ -45,11 +78,17 @@ final class ItemDebug {
     static List<Component> describe(String material,Map<String,Object> values,int page,boolean canManage,Set<String> whitelist) {
         int pages = Math.max(1,(values.size()+9)/10);
         if (page < 1 || page > pages) throw new QueryException("INVALID_PAGE","组件页码应为 1–" + pages + "。");
+        Map<String,Object> selected = new LinkedHashMap<>();
+        new TreeMap<>(values).entrySet().stream().skip((page-1L)*10).limit(10).forEach(e -> selected.put(e.getKey(),e.getValue()));
+        return describePage(material,selected,page,values.size(),canManage,whitelist);
+    }
+    private static List<Component> describePage(String material,Map<String,Object> values,int page,int total,boolean canManage,Set<String> whitelist) {
+        int pages = Math.max(1,(total+9)/10);
         List<Component> lines = new ArrayList<>();
-        lines.add(LookupRenderer.notice("主手 " + material + " · 全部有效组件 " + values.size() + " 个（含默认值）")
+        lines.add(LookupRenderer.notice("主手 " + material + " · 全部有效组件 " + total + " 个（含默认值）")
                 .append(copy(" [复制物品ID]",material)));
         lines.add(Component.text("每行一个组件；复制值或完整 content 条件。第 " + page + "/" + pages + " 页",GRAY));
-        var entries = new TreeMap<>(values).entrySet().stream().skip((page-1L)*10).limit(10).toList();
+        var entries = new TreeMap<>(values).entrySet();
         for (var entry : entries) {
             String value = entry.getValue().toString();
             String preview = value.replace('\n',' ').replace('\r',' ').replace("§","\\u00a7");
@@ -85,9 +124,14 @@ final class ItemDebug {
         String key = ItemContent.componentId(args[3]);
         boolean add = args[2].equalsIgnoreCase("add");
         try {
-            boolean changed = plugin.updateComponentWhitelist(key,add);
-            String state = changed ? (add ? "已加入白名单：" : "已移出白名单：") : (add ? "已在白名单中：" : "已不在白名单中：");
-            LookupRenderer.send(sender,LookupRenderer.notice(state + key + "。配置已保存，补全与面板立即生效。"));
+            plugin.updateComponentWhitelist(key,add,(changed,failure) -> {
+                if (failure != null) {
+                    plugin.getLogger().log(java.util.logging.Level.WARNING,"Unable to save component whitelist",failure);
+                    LookupRenderer.send(sender,LookupRenderer.notice("白名单保存失败，未更新生效配置。")); return;
+                }
+                String state = changed ? (add ? "已加入白名单：" : "已移出白名单：") : (add ? "已在白名单中：" : "已不在白名单中：");
+                LookupRenderer.send(sender,LookupRenderer.notice(state + key + "。配置已保存，补全与面板立即生效。"));
+            });
         } catch (Exception ex) {
             plugin.getLogger().log(java.util.logging.Level.WARNING,"Unable to save component whitelist",ex);
             throw new QueryException("CONFIG_SAVE_FAILED","白名单保存失败，未更新生效配置。请检查配置文件与服务器日志。");

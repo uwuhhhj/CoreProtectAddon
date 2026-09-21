@@ -8,4 +8,9 @@ import java.util.List;
 @FunctionalInterface
 public interface ComponentMatcher {
     BitSet match(List<LookupRecord> records, String content, long deadlineNanos);
+    /** Compile once per query. Existing embedders/test matchers retain their original contract. */
+    default ComponentMatcher prepare(String content, long deadlineNanos) {
+        match(List.of(),content,deadlineNanos);
+        return this;
+    }
 }

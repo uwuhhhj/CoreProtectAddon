@@ -30,6 +30,23 @@ public class DuckDBTest {
     private static final long USER = 5_000_000_001L;
     private static final QueryLimits LIMITS = new QueryLimits(true, 604800, 15, 100, 1000, 5);
 
+    @Test public void oversizedMetadataIsMarkedWithoutLoadingTheBlobIntoTheResult() throws Exception {
+        try (var statement = writer.prepareStatement("UPDATE fixture_item SET data=? WHERE rowid=4")) {
+            statement.setBytes(1,new byte[ItemSnapshot.MAX_METADATA_BYTES+1]); statement.executeUpdate();
+        }
+        var result = lookup("a:+item t:1d");
+        assertTrue(result.message(),result.success());
+        var snapshot = result.records().stream().filter(row -> row.rowId()==4).findFirst().orElseThrow().itemSnapshot();
+        assertTrue(snapshot.tooLarge()); assertNull(snapshot.metadata());
+    }
+
+    @Test public void metadataBudgetRejectsAnOversizedPageBeforeLoadingPayloads() throws Exception {
+        try (var statement = writer.prepareStatement("UPDATE fixture_item SET data=? WHERE action BETWEEN 2 AND 4")) {
+            statement.setBytes(1,new byte[6*1024*1024]); statement.executeUpdate();
+        }
+        assertEquals("METADATA_LIMIT",lookup("a:item t:1d").errorCode());
+    }
+
     @Before public void fixture() throws Exception {
         folder = temporary.newFolder("CoreProtect 数据").toPath().toRealPath();
         path = folder.resolve("database.duckdb");
@@ -119,7 +136,7 @@ public class DuckDBTest {
         ids(lookup("a:chat t:1d content:hello.*"), USER+2,USER+1);
         ids(lookup("a:command t:1d content:^/op"), 1L);
         assertEquals("UNKNOWN_USER", lookup("a:item t:1d u:nobody").errorCode());
-        assertEquals("QUERY_FAILED", lookup("a:chat t:1d content:[").errorCode());
+        assertEquals("QUERY_FAILED", lookup("a:chat t:1d content:\"[\"").errorCode());
         LookupRecord row = lookup("a:+item t:1d").records().get(0);
         assertEquals(USER, row.playerId()); assertEquals("Steve", row.playerName());
         assertEquals("fixture_world", row.world()); assertEquals("minecraft:iron_ingot", row.material()); assertNull(row.x());

@@ -19,6 +19,7 @@ public final class HistoricalItemDecoder {
 
     public static ItemStack decode(LookupRecord record) throws IOException, ClassNotFoundException {
         if (record.itemSnapshot() == null) throw new IOException("Historical item was not loaded");
+        if (record.itemSnapshot().tooLarge()) throw new IOException("Historical metadata too large");
         Material material = Material.matchMaterial(record.material());
         if (material == null || !material.isItem() || material.isAir()) throw new IOException("Unknown historical material");
         ItemStack item = new ItemStack(material, Math.max(1, record.amount()));

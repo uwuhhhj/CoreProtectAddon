@@ -26,45 +26,72 @@ public class DataManager {
     protected Cache<String, UserKey> userCache = CacheBuilder.newBuilder()
             .expireAfterAccess(30, TimeUnit.MINUTES).build();
 
-    public DataManager() throws Exception {
-        try {
+    private final QueryLimits queryLimits;
+    private final int componentMaxCandidates;
+    @FunctionalInterface public interface DuckFactory { DuckDBReadOnlyDataSource open() throws Exception; }
+    public record Settings(DatabaseType type, Tables tables, QueryLimits limits, int candidates,
+            String driver, String jdbc, String username, String password, boolean debug,
+            ClickHouseConnectionSettings clickhouse, DuckFactory duck) {
+        /** Capture on the server thread; connecting and validating happen later on a worker. */
+        public static Settings capture() throws Exception {
             DatabaseType type = DatabaseType.parse(PluginConfig.DATABASE_TYPE.getNotNull());
-            Main.info("尝试连接到数据库：" + type + "...");
+            QueryLimits limits = QueryLimits.configured();
+            ClickHouseConnectionSettings clickhouse = type != DatabaseType.CLICKHOUSE ? null :
+                    new ClickHouseConnectionSettings(PluginConfig.CLICKHOUSE_HOST.getNotNull(),PluginConfig.CLICKHOUSE_PORT.getNotNull(),
+                            PluginConfig.CLICKHOUSE_DATABASE.getNotNull(),PluginConfig.CLICKHOUSE_USERNAME.getNotNull(),
+                            PluginConfig.CLICKHOUSE_PASSWORD.getNotNull(),PluginConfig.CLICKHOUSE_TLS.getNotNull(),limits.timeoutSeconds());
+            DuckFactory duck = null;
             if (type == DatabaseType.DUCKDB) {
-                DuckDBReadOnlyDataSource source = DuckDBReadOnlyDataSource.fromCoreProtect();
-                this.dataSource = source;
-                this.tables = Tables.prefixed(source.tablePrefix());
-                Main.info("DuckDB 只读查询目标：" + source.databasePath() + "；表前缀：" + source.tablePrefix(),
-                        "复用 CoreProtect 已打开的数据库；每次查询使用独立 READ ONLY 事务。");
-                try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {
-                    statement.setQueryTimeout(QueryLimits.configured().timeoutSeconds());
-                    validateTables(statement, tables, "\"");
-                }
-            } else {
-                this.tables = Tables.configured();
-                if (type == DatabaseType.CLICKHOUSE) {
-                    ClickHouseConnectionSettings settings = new ClickHouseConnectionSettings(PluginConfig.CLICKHOUSE_HOST.getNotNull(),
-                            PluginConfig.CLICKHOUSE_PORT.getNotNull(), PluginConfig.CLICKHOUSE_DATABASE.getNotNull(),
-                            PluginConfig.CLICKHOUSE_USERNAME.getNotNull(), PluginConfig.CLICKHOUSE_PASSWORD.getNotNull(),
-                            PluginConfig.CLICKHOUSE_TLS.getNotNull(), QueryLimits.configured().timeoutSeconds());
-                    Main.info("ClickHouse 查询目标：" + settings.jdbcUrl() + "；用户：" + PluginConfig.CLICKHOUSE_USERNAME.getNotNull()
-                            + "；密码状态：" + (PluginConfig.CLICKHOUSE_PASSWORD.getNotNull().isEmpty() ? "空密码" : "已设置"));
-                    this.dataSource = settings.createDataSource();
-                    validateClickHouse(this.dataSource, tables, QueryLimits.configured().timeoutSeconds());
-                } else {
-                    this.sqlManager = EasySQL.createManager(
-                            PluginConfig.DATABASE.DRIVER_NAME.getNotNull(), PluginConfig.DATABASE.buildJDBC(),
-                            PluginConfig.DATABASE.USERNAME.getNotNull(), PluginConfig.DATABASE.PASSWORD.getNotNull()
-                    );
-                    this.sqlManager.setDebugMode(() -> Main.getInstance().isDebugging());
-                    this.dataSource = this.sqlManager.getDataSource();
-                }
+                var plugin = org.bukkit.Bukkit.getPluginManager().getPlugin("CoreProtect");
+                if (plugin == null || !plugin.isEnabled()) throw new SQLException("DuckDB 模式需要已启用的 CoreProtect。");
+                var loader = plugin.getClass().getClassLoader();
+                var folder = plugin.getDataFolder().toPath();
+                duck = () -> DuckDBReadOnlyDataSource.fromRuntime(loader,folder,plugin::isEnabled);
             }
-        } catch (Exception exception) {
-            shutdown();
-            throw new Exception(connectionFailureMessage(exception), exception);
+            return new Settings(type,Tables.configured(),limits,PluginConfig.QUERY.COMPONENT_MAX_CANDIDATES.getNotNull(),
+                    PluginConfig.DATABASE.DRIVER_NAME.getNotNull(),boundedJdbc(PluginConfig.DATABASE.buildJDBC(),limits.timeoutSeconds()),
+                    PluginConfig.DATABASE.USERNAME.getNotNull(),PluginConfig.DATABASE.PASSWORD.getNotNull(),PluginConfig.DEBUG.resolve(),clickhouse,duck);
         }
     }
+    static String boundedJdbc(String jdbc,int seconds) {
+        for (String option : List.of("connectTimeout","socketTimeout"))
+            if (!java.util.regex.Pattern.compile("(?i)[?&]"+option+"=").matcher(jdbc).find())
+                jdbc += (jdbc.contains("?") ? "&" : "?") + option + "=" + seconds * 1000L;
+        return jdbc;
+    }
+    public DataManager() throws Exception { this(Settings.capture()); }
+    public DataManager(Settings settings) throws Exception {
+        queryLimits = settings.limits(); componentMaxCandidates = settings.candidates();
+        try {
+            if (settings.type() == DatabaseType.DUCKDB) {
+                DuckDBReadOnlyDataSource source = settings.duck().open();
+                dataSource = source; tables = Tables.prefixed(source.tablePrefix());
+                try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {
+                    statement.setQueryTimeout(queryLimits.timeoutSeconds()); validateTables(statement,tables,"\"");
+                }
+            } else {
+                tables = settings.tables();
+                if (settings.type() == DatabaseType.CLICKHOUSE) {
+                    dataSource = settings.clickhouse().createDataSource();
+                    validateClickHouse(dataSource,tables,queryLimits.timeoutSeconds());
+                } else {
+                    sqlManager = EasySQL.createManager(settings.driver(),settings.jdbc(),settings.username(),settings.password());
+                    sqlManager.setDebugMode(settings.debug());
+                    dataSource = sqlManager.getDataSource();
+                }
+            }
+            try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+                statement.setQueryTimeout(queryLimits.timeoutSeconds());
+                try (ResultSet result = statement.executeQuery("SELECT 1")) {
+                    if (!result.next()) throw new SQLException("数据库连接测试未返回结果。");
+                }
+            }
+        } catch (Exception ex) {
+            shutdown(); throw ex;
+        }
+    }
+    public QueryLimits queryLimits() { return queryLimits; }
+    public int componentMaxCandidates() { return componentMaxCandidates; }
 
 
     public void shutdown() {
@@ -148,7 +175,7 @@ public class DataManager {
                 + "` WHERE `" + type.dataKey() + "`=? LIMIT 1";
         if (dataSource instanceof DuckDBReadOnlyDataSource) query = query.replace('`', '"');
         try (Connection connection = dataSource().getConnection(); PreparedStatement statement = connection.prepareStatement(query)) {
-            statement.setQueryTimeout(QueryLimits.configured().timeoutSeconds());
+            statement.setQueryTimeout(queryLimits.timeoutSeconds());
             statement.setObject(1, param instanceof java.util.UUID ? param.toString() : param);
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) return null;

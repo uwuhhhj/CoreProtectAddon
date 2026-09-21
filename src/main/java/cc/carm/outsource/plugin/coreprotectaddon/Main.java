@@ -10,7 +10,6 @@ import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.ConfigurationReload;
 import cc.carm.outsource.plugin.coreprotectaddon.manager.DataManager;
-import cc.carm.outsource.plugin.coreprotectaddon.manager.CoreProtectConnectionDiagnostics;
 import cc.carm.outsource.plugin.coreprotectaddon.service.CoreProtectQueryService;
 import org.bukkit.event.Listener;
 import org.jetbrains.annotations.NotNull;
@@ -27,6 +26,28 @@ public class Main extends EasyPlugin implements Listener {
     protected volatile DataManager dataManager;
     protected volatile CoreProtectQueryService queryService;
     private QueryCommands queryCommands;
+    private final cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool queryTasks = new cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool();
+    private final java.util.concurrent.ExecutorService maintenance = java.util.concurrent.Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task,"COQ-maintenance"); thread.setDaemon(true); return thread;
+    });
+    private volatile boolean stopping;
+    private boolean maintenanceBusy;
+    public cc.carm.outsource.plugin.coreprotectaddon.service.QueryTaskPool queryTasks() { return queryTasks; }
+    private void onMain(Runnable work,Runnable discarded) {
+        if (stopping) { discarded.run(); return; }
+        try { getServer().getScheduler().runTask(this,() -> {
+            if (stopping) discarded.run(); else work.run();
+        }); } catch (RuntimeException ex) { discarded.run(); }
+    }
+    private void retire(DataManager manager) {
+        if (manager != null) {
+            try { maintenance.execute(manager::shutdown); }
+            catch (java.util.concurrent.RejectedExecutionException ex) {
+                Thread cleanup = new Thread(manager::shutdown,"COQ-cleanup"); cleanup.setDaemon(true); cleanup.start();
+            }
+        }
+    }
+
 
     @Override
     protected void load() {
@@ -38,41 +59,39 @@ public class Main extends EasyPlugin implements Listener {
 
     @Override
     protected boolean initialize() {
-
-        // onLoad runs before dependencies are enabled. Connect here so CoreProtect can initialize its views first.
-        log("加载数据库...");
+        var command = getCommand("coreprotectquery");
+        if (command == null) return false;
+        command.setExecutor((sender,cmd,label,args) -> { sender.sendMessage("COQ 数据库正在初始化，请稍候。"); return true; });
         try {
-            this.dataManager = new DataManager();
-            this.queryService = new CoreProtectQueryService(this.dataManager);
-        } catch (Exception e) {
-            e.printStackTrace();
-            log("§c数据库加载失败，已取消插件启用：" + e.getMessage());
-            if ("clickhouse".equalsIgnoreCase(PluginConfig.DATABASE_TYPE.getNotNull().trim()))
-                CoreProtectConnectionDiagnostics.collect().forEach(message -> log(message));
-            if (this.dataManager != null) this.dataManager.shutdown();
-            this.dataManager = null;
-            this.queryService = null;
-            // EasyPlugin.onEnable disables the plugin when initialize returns false.
-            return false;
+            var settings = DataManager.Settings.capture();
+            maintenance.execute(() -> {
+                try {
+                    DataManager loaded = new DataManager(settings);
+                    onMain(() -> {
+                        dataManager = loaded; queryService = new CoreProtectQueryService(loaded);
+                        queryCommands = new QueryCommands(this,queryService);
+                        command.setExecutor(queryCommands); command.setTabCompleter(new QueryTabCompleter());
+                        log("数据库初始化完成，COQ 已就绪。");
+                    },() -> retire(loaded));
+                } catch (Exception ex) {
+                    onMain(() -> {
+                        getLogger().log(java.util.logging.Level.SEVERE,"COQ 数据库初始化失败",ex);
+                        getServer().getPluginManager().disablePlugin(this);
+                    },() -> { });
+                }
+            });
+            return true;
+        } catch (Exception ex) {
+            getLogger().log(java.util.logging.Level.SEVERE,"COQ 配置初始化失败",ex); return false;
         }
-
-        log("注册命令...");
-        if (getCommand("coreprotectquery") != null) {
-            this.queryCommands = new QueryCommands(this);
-            getCommand("coreprotectquery").setExecutor(queryCommands);
-            getCommand("coreprotectquery").setTabCompleter(new QueryTabCompleter());
-        }
-
-        return true;
     }
 
-    @Override
-    protected void shutdown() {
-
-        log("正在关闭数据库连接...");
-        if (this.queryCommands != null) this.queryCommands.close();
-        if (this.dataManager != null) this.dataManager.shutdown();
-
+    @Override protected void shutdown() {
+        stopping = true;
+        if (queryCommands != null) queryCommands.close();
+        queryTasks.close();
+        retire(dataManager);
+        maintenance.shutdown(); // Never wait for a JDBC operation on the server thread.
     }
 
     public static void info(String... messages) {
@@ -100,19 +119,26 @@ public class Main extends EasyPlugin implements Listener {
         return getInstance().dataManager;
     }
 
-    /** Server-thread edit of just the whitelist, preserving other administrator edits on disk. */
-    public boolean updateComponentWhitelist(String component, boolean add) throws Exception {
+    /** Serialize configuration writes and reloads; file I/O is performed only by maintenance. */
+    public void updateComponentWhitelist(String component, boolean add,
+            java.util.function.BiConsumer<Boolean,Throwable> done) {
+        if (maintenanceBusy) throw new cc.carm.outsource.plugin.coreprotectaddon.service.QueryException("CONFIG_BUSY","配置操作正在进行，请稍后重试。");
         String key = cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.componentId(component);
+        maintenanceBusy = true;
         String path = "item-panel.component-whitelist";
         var file = getDataFolder().toPath().resolve("config.yml");
+        String fallback = configuration.getConfig().config().original().saveToString();
+        var defaults = PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy();
+        maintenance.execute(() -> {
+            try {
         var yaml = new org.bukkit.configuration.file.YamlConfiguration();
         yaml.options().parseComments(true);
         if (java.nio.file.Files.exists(file)) yaml.load(file.toFile());
-        else yaml.loadFromString(configuration.getConfig().config().original().saveToString());
+        else yaml.loadFromString(fallback);
         if (yaml.contains(path) && (!yaml.isList(path) || yaml.getList(path).stream().anyMatch(value -> !(value instanceof String))))
             throw new IllegalArgumentException("component-whitelist 必须是组件名列表。");
         var whitelist = new java.util.LinkedHashSet<String>();
-        for (String entry : yaml.contains(path) ? yaml.getStringList(path) : PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy())
+        for (String entry : yaml.contains(path) ? yaml.getStringList(path) : defaults)
             whitelist.add(cc.carm.outsource.plugin.coreprotectaddon.service.ItemContent.componentId(entry));
         boolean changed = add ? whitelist.add(key) : whitelist.remove(key);
         var updated = new java.util.ArrayList<>(whitelist);
@@ -126,49 +152,74 @@ public class Main extends EasyPlugin implements Listener {
                 java.nio.file.Files.move(temporary,file,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         } finally { java.nio.file.Files.deleteIfExists(temporary); }
-        configuration.getConfig().config().original().set(path,updated);
-        PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.set(updated);
-        return changed;
+                onMain(() -> {
+                    configuration.getConfig().config().original().set(path,updated);
+                    PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.set(updated);
+                    maintenanceBusy = false; done.accept(changed,null);
+                },() -> { });
+            } catch (Exception ex) { onMain(() -> { maintenanceBusy = false; done.accept(false,ex); },() -> { }); }
+        });
     }
 
-    /** Called on the server thread. Publish replacements only after configuration and connection validation. */
-    public void reloadAddon() throws Exception {
-        var command = java.util.Objects.requireNonNull(getCommand("coreprotectquery"),"Missing COQ command");
-        DataManager replacement = null;
+    /** Read off-thread, validate a detached candidate, connect off-thread, then publish on the server thread. */
+    public void reloadAddon(java.util.function.Consumer<Throwable> done) {
+        if (maintenanceBusy) throw new cc.carm.outsource.plugin.coreprotectaddon.service.QueryException("CONFIG_BUSY","配置操作正在进行，请稍后重试。");
+        maintenanceBusy = true;
+        var folder = getDataFolder().toPath();
+        maintenance.execute(() -> {
+            try {
+                var config = ConfigurationReload.read(folder.resolve("config.yml"));
+                var messages = ConfigurationReload.read(folder.resolve("messages.yml"));
+                onMain(() -> {
+                    final DataManager.Settings settings;
+                    try (var rollback = new ConfigurationReload(configuration.getConfig(),configuration.getMessage())) {
+                        ConfigurationReload.apply(configuration.getConfig(),config);
+                        ConfigurationReload.apply(configuration.getMessage(),messages);
+                        ConfigurationReload.validate();
+                        settings = DataManager.Settings.capture();
+                    } catch (Exception ex) { finishReload(done,ex); return; }
+                    maintenance.execute(() -> {
+                        try {
+                            DataManager replacement = new DataManager(settings);
+                            onMain(() -> publishReload(config,messages,replacement,done),() -> retire(replacement));
+                        } catch (Exception ex) { onMain(() -> finishReload(done,ex),() -> { }); }
+                    });
+                },() -> { });
+            } catch (Exception ex) { onMain(() -> finishReload(done,ex),() -> { }); }
+        });
+    }
+    private void publishReload(org.bukkit.configuration.file.YamlConfiguration config,
+            org.bukkit.configuration.file.YamlConfiguration messages,DataManager replacement,java.util.function.Consumer<Throwable> done) {
+        DataManager previousData = dataManager;
+        QueryCommands previousCommands = queryCommands;
         QueryCommands replacementCommands = null;
-        DataManager previousData = this.dataManager;
-        QueryCommands previousCommands = this.queryCommands;
-        try (var reload = new ConfigurationReload(configuration.getConfig(),configuration.getMessage())) {
-            configuration.reload();
+        try (var rollback = new ConfigurationReload(configuration.getConfig(),configuration.getMessage())) {
+            ConfigurationReload.apply(configuration.getConfig(),config);
+            ConfigurationReload.apply(configuration.getMessage(),messages);
             ConfigurationReload.validate();
-            replacement = new DataManager();
-            // MySQL pools may connect lazily; reject a bad target before retiring the working pool.
-            try (var connection = replacement.dataSource().getConnection(); var statement = connection.createStatement()) {
-                statement.setQueryTimeout(cc.carm.outsource.plugin.coreprotectaddon.service.QueryLimits.configured().timeoutSeconds());
-                try (var result = statement.executeQuery("SELECT 1")) {
-                    if (!result.next()) throw new java.sql.SQLException("数据库连接测试未返回结果。");
-                }
-            }
             CoreProtectQueryService replacementService = new CoreProtectQueryService(replacement);
             replacementCommands = new QueryCommands(this,replacementService);
-            command.setExecutor(replacementCommands);
-            this.dataManager = replacement;
-            this.queryService = replacementService;
-            this.queryCommands = replacementCommands;
-            reload.commit();
+            java.util.Objects.requireNonNull(getCommand("coreprotectquery")).setExecutor(replacementCommands);
+            dataManager = replacement; queryService = replacementService; queryCommands = replacementCommands;
+            rollback.commit();
         } catch (Exception ex) {
             if (replacementCommands != null) replacementCommands.close();
-            if (replacement != null) replacement.shutdown();
-            throw ex;
+            retire(replacement); finishReload(done,ex); return;
         }
         try { previousCommands.close(); }
         catch (RuntimeException ex) { getLogger().log(java.util.logging.Level.WARNING,"Unable to retire old queries",ex); }
-        try { previousData.shutdown(); }
-        catch (RuntimeException ex) { getLogger().log(java.util.logging.Level.WARNING,"Unable to retire old connection",ex); }
+        finally { retire(previousData); finishReload(done,null); }
+    }
+    private void finishReload(java.util.function.Consumer<Throwable> done,Throwable failure) {
+        maintenanceBusy = false;
+        if (failure != null) getLogger().log(java.util.logging.Level.WARNING,"COQ reload failed",failure);
+        done.accept(failure);
     }
 
     public @NotNull QueryResult query(@NotNull QueryRequest request) {
-        return this.queryService.query(request);
+        var service = this.queryService;
+        if (service == null) return QueryResult.failure(request.queryType(),"NOT_READY","COQ 数据库尚未就绪。",1,15,0);
+        return service.query(request);
     }
 
     public static CoreProtectQueryService getQueryService() {

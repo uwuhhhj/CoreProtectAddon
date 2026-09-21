@@ -12,7 +12,7 @@ import java.util.function.Predicate;
  */
 public final class ItemComponents {
     public static final int MAX_CONTENT = 16384;
-    private static Bridge bridge;
+    private static volatile Bridge bridge;
     private ItemComponents() { }
 
     public static Map<String,Object> parse(String input) {

@@ -76,6 +76,12 @@ public record ItemContent(String id, boolean itemOnly, Set<String> present, Stri
     }
 
     public java.util.function.Predicate<ItemStack> compile(List<String> whitelist) {
+        Compiled compiled = compileSnapshot(whitelist);
+        return item -> compiled.test(compiled.capture(item));
+    }
+
+    /** Server-thread preparation; registry and configuration access never escape into test(). */
+    public Compiled compileSnapshot(List<String> whitelist) {
         Map<String,Object> expected = compound == null ? Map.of() : ItemComponents.parse(compound);
         boolean componentName = valueSearch != null && id != null
                 && org.bukkit.Registry.DATA_COMPONENT_TYPE.get(org.bukkit.NamespacedKey.fromString(id)) != null;
@@ -88,25 +94,40 @@ public record ItemContent(String id, boolean itemOnly, Set<String> present, Stri
         // Preserve the original string's case and compare typed leaves, independent of plugin/key names.
         Object nestedValue = valueSearch == null || searchable.isEmpty() ? null
                 : ItemComponents.parse("{\"coq:value\":\"" + valueSearch.replace("\\","\\\\").replace("\"","\\\"") + "\"}").get("coq:value");
-        return item -> {
-            Set<String> types = new HashSet<>();
-            item.getDataTypes().forEach(type -> types.add(type.getKey().toString()));
+        Set<String> selected = new LinkedHashSet<>(expected.keySet());
+        if (nestedValue != null) selected.addAll(searchable);
+        String materialKey = materialType ? materialName.getKey().toString() : null;
+        return new Compiled(Set.copyOf(selected), snapshot -> {
+            Set<String> types = snapshot.types();
             if (valueSearch != null) {
                 if (componentName) {
                     if (!types.contains(id)) return false;
                 } else if (materialType) {
-                    if (item.getType() != materialName) return false;
+                    if (!snapshot.material().equals(materialKey)) return false;
                 } else {
                     if (nestedValue == null || Collections.disjoint(searchable,types)) return false;
-                    if (!ItemComponents.containsNestedValue(ItemComponents.values(item,searchable).values(),nestedValue)) return false;
+                    if (!ItemComponents.containsNestedValue(snapshot.values().values(),nestedValue)) return false;
                 }
-            } else if (id != null && !item.getType().getKey().toString().equals(id)
+            } else if (id != null && !snapshot.material().equals(id)
                     && (itemOnly || !types.contains(id))) {
                 return false;
             }
             return types.containsAll(present) && (expected.isEmpty()
-                    || ItemComponents.matches(expected,ItemComponents.values(item,expected.keySet())));
-        };
+                    || ItemComponents.matches(expected,snapshot.values()));
+        });
+    }
+
+    /** Encoded NBT is newly allocated by the codec, privately owned and never mutated after publication. */
+    public record Snapshot(String material, Set<String> types, Map<String,Object> values) { }
+    public record Compiled(Set<String> keys, java.util.function.Predicate<Snapshot> predicate) {
+        public Snapshot capture(ItemStack item) {
+            Set<String> types = new HashSet<>();
+            item.getDataTypes().forEach(type -> types.add(type.getKey().toString()));
+            return new Snapshot(item.getType().getKey().toString(),Set.copyOf(types),
+                    keys.isEmpty() ? Map.of() : ItemComponents.values(item,keys));
+        }
+        /** Worker-only data comparison: no ItemStack, Bukkit registry or server state access. */
+        public boolean test(Snapshot snapshot) { return predicate.test(snapshot); }
     }
 
     public static String componentId(String input) {

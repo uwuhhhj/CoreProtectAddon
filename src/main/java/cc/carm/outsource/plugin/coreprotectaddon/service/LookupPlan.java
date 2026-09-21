@@ -177,11 +177,37 @@ final class LookupPlan {
         Map<Long,String> materials=labels(tables.materials(),"id","material",rows.stream().filter(r->r.typed() && !r.entity()).map(Row::type).toList());
         Map<Long,String> entities=labels(tables.entities(),"id","entity",rows.stream().filter(Row::entity).map(Row::type).filter(id->id!=0).toList());
         Map<String,Map<Long,ItemSnapshot>> snapshots=new HashMap<>();
+        long[] metadataBytes = {0};
         for(String source:List.of("item","container")) {
             List<Long> ids=rows.stream().filter(r->r.source.equals(source)).map(Row::id).toList();
             if(ids.isEmpty())continue;
             String column=source.equals("item")?"data":"metadata";
-            snapshots.put(source,sql.read("SELECT `rowid`,`"+column+"` AS `item_metadata` FROM "+quote(table(source))+" WHERE `rowid` IN ("+marks(ids.size())+")",ids,rs->{Map<Long,ItemSnapshot> out=new HashMap<>();while(rs.next())out.put(rs.getLong("rowid"),new ItemSnapshot(readItemMetadata(rs,sql.clickhouse)));return out;}));
+            // Fetch sizes first: an oversized history row must not be materialized by JDBC just to reject it later.
+            Map<Long,Long> lengths = sql.read("SELECT `rowid`,"+(sql.clickhouse ? "length" : "OCTET_LENGTH")+"(`"+column+"`) AS `coq_metadata_size` FROM "+quote(table(source))
+                    +" WHERE `rowid` IN ("+marks(ids.size())+")",ids,rs -> {
+                Map<Long,Long> sizes = new LinkedHashMap<>();
+                while(rs.next()) sizes.put(rs.getLong("rowid"),rs.getLong("coq_metadata_size"));
+                return sizes;
+            });
+            Map<Long,ItemSnapshot> payloads = new HashMap<>();
+            List<Long> readable = new ArrayList<>();
+            for (var entry : lengths.entrySet()) {
+                long length = Math.max(0,entry.getValue() - (sql.clickhouse ? 1 : 0));
+                if (length > ItemSnapshot.MAX_METADATA_BYTES) payloads.put(entry.getKey(),ItemSnapshot.oversized());
+                else {
+                    metadataBytes[0] += length;
+                    if (metadataBytes[0] > 16 * 1024 * 1024)
+                        throw error("METADATA_LIMIT","本批历史物品数据超过 16 MiB，查询未完成；请缩小范围或每页条数。");
+                    readable.add(entry.getKey());
+                }
+            }
+            if (!readable.isEmpty()) payloads.putAll(sql.read("SELECT `rowid`,`"+column+"` AS `item_metadata` FROM "+quote(table(source))
+                    +" WHERE `rowid` IN ("+marks(readable.size())+")",readable,rs -> {
+                Map<Long,ItemSnapshot> out = new HashMap<>();
+                while(rs.next()) out.put(rs.getLong("rowid"),new ItemSnapshot(readItemMetadata(rs,sql.clickhouse)));
+                return out;
+            }));
+            snapshots.put(source,payloads);
         }
         List<LookupRecord> records=new ArrayList<>();
         for(Row r:rows) {
@@ -195,8 +221,8 @@ final class LookupPlan {
 
     private LookupResult components(String base,int page,int size,int offset,long started) throws SQLException {
         if(candidateLimit<1 || candidateLimit>100000)throw error("INVALID_CONFIG","component-max-candidates 必须为 1–100000。");
-        matcher.match(List.of(),request.content(),sql.deadline);
-        int scanned=0,found=0; LookupRecord last=null; List<LookupRecord> output=new ArrayList<>();
+        ComponentMatcher compiled = matcher.prepare(request.content(),sql.deadline);
+        int scanned=0,found=0; long retainedBytes=0; LookupRecord last=null; List<LookupRecord> output=new ArrayList<>();
         while(found<=limits.maxResults()) {
             List<Object> values=new ArrayList<>(parameters); String cursor="";
             if(last!=null) {cursor=" WHERE (`time` < ? OR (`time` = ? AND `rowid` < ?))";values.addAll(List.of(last.time(),last.time(),last.rowId()));}
@@ -204,10 +230,15 @@ final class LookupPlan {
             List<LookupRecord> batch=load("SELECT *"+base+cursor+order()+" LIMIT "+batchSize,values);
             if(batch.isEmpty())break;
             if(scanned+batch.size()>candidateLimit)throw error("COMPONENT_SCAN_LIMIT","组件查询候选超出限制，搜索未完成；请缩小时间或范围。");
-            BitSet matches=matcher.match(batch,request.content(),sql.deadline);
+            BitSet matches=compiled.match(batch,request.content(),sql.deadline);
             if(System.nanoTime()>=sql.deadline)throw new SQLTimeoutException("Component query deadline expired");
             for(int i=0;i<batch.size() && found<=limits.maxResults();i++)if(matches.get(i)) {
-                if(!request.options().countOnly() && found>=offset && found<offset+size && found<limits.maxResults())output.add(batch.get(i));
+                if(!request.options().countOnly() && found>=offset && found<offset+size && found<limits.maxResults()) {
+                    LookupRecord row = batch.get(i);
+                    retainedBytes += row.itemSnapshot() == null ? 0 : row.itemSnapshot().size();
+                    if (retainedBytes > 16 * 1024 * 1024) throw error("METADATA_LIMIT","当前页历史物品数据超过 16 MiB，请减少每页条数。");
+                    output.add(row);
+                }
                 found++;
             }
             scanned+=batch.size();last=batch.get(batch.size()-1);if(batch.size()<batchSize)break;

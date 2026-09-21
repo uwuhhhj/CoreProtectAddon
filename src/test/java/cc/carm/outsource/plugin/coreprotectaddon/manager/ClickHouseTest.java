@@ -127,6 +127,11 @@ public class ClickHouseTest {
         Assume.assumeNotNull(jar);
         try (Fixture fixture = new Fixture(); var loader = new java.net.URLClassLoader(
                 new java.net.URL[]{new File(jar).toURI().toURL()}, ClassLoader.getPlatformClassLoader())) {
+            // Verify service discovery after shading, without a server-provided logger.
+            Class<?> loggerFactory = loader.loadClass("cc.carm.outsource.plugin.coreprotectaddon.lib.slf4j.LoggerFactory");
+            Object loggingBackend = loggerFactory.getMethod("getILoggerFactory").invoke(null);
+            assertEquals("cc.carm.outsource.plugin.coreprotectaddon.lib.slf4j.jul.JDK14LoggerFactory",
+                    loggingBackend.getClass().getName());
             Class<?> settings = loader.loadClass(ClickHouseConnectionSettings.class.getName());
             Object config = settings.getConstructor(String.class, int.class, String.class, String.class, String.class, boolean.class, int.class)
                     .newInstance("127.0.0.1", fixture.server.getAddress().getPort(), "coq_fixture", "fixture_user", "p'&?#", false, 5);
@@ -230,6 +235,9 @@ public class ClickHouseTest {
                     response = rows(new String[]{"rowid","time","user","wid","x","y","z","type","amount","action","data","rolled_back","message","uuid","source","source_order"},
                             new String[]{"Int64","Int64","Int64","Int64","Nullable(Int32)","Int32","Nullable(Int32)","Int64","Int32","Int8","Int64","Int8","String","String","String","Int32"},
                             new Object[]{LARGE_ID,99_900L,LARGE_ID,42L,null,64,null,101L,64,3,0L,0,item ? "" : "hello ' \\ 世界","",item ? "item" : "chat",item ? 2 : 0});
+                } else if (sql.contains("coq_metadata_size")) {
+                    response = rows(new String[]{"rowid","coq_metadata_size"},new String[]{"Int64","UInt64"},
+                            new Object[]{LARGE_ID,6L});
                 } else if (sql.contains("item_metadata")) {
                     response = rows(new String[]{"rowid","item_metadata"},new String[]{"Int64","Array(Int8)"},
                             new Object[]{LARGE_ID,new byte[]{0,(byte)0xac,(byte)0xed,0,5,(byte)0xff}});

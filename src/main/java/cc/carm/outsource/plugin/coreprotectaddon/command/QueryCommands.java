@@ -15,12 +15,13 @@ import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
 
-public final class QueryCommands implements CommandExecutor, AutoCloseable {
+public final class QueryCommands implements CommandExecutor, AutoCloseable, org.bukkit.event.Listener {
     private final Main plugin;
     private final LookupSessions sessions;
     private final Set<String> pending = new HashSet<>();
     private final ItemPreparationQueue preparation;
     private final ItemLookupPanel panels;
+    private final ItemDebug debug;
     private final CoreProtectQueryService queryService;
     private volatile boolean closed;
     public QueryCommands(Main plugin) {
@@ -32,14 +33,16 @@ public final class QueryCommands implements CommandExecutor, AutoCloseable {
         this.sessions = new LookupSessions(Clock.systemUTC(), PluginConfig.QUERY.SESSION_TTL_SECONDS.resolve(),
                 PluginConfig.QUERY.MAX_SESSIONS.resolve());
         this.preparation = new ItemPreparationQueue(plugin);
-        queryService.setComponentMatcher(preparation::match);
-        this.panels = new ItemLookupPanel(plugin,sessions,preparation,queryService::lookup);
+        queryService.setComponentMatcher(preparation.matcher());
+        this.debug = new ItemDebug(plugin,preparation);
+        this.panels = new ItemLookupPanel(plugin,sessions,preparation,queryService::lookup,plugin.queryTasks());
+        Bukkit.getPluginManager().registerEvents(this,plugin);
     }
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (closed) return true;
         if (args.length > 0 && args[0].equalsIgnoreCase("debug")) {
-            ItemDebug.execute(plugin,sender,args);
+            debug.execute(sender,args);
             return true;
         }
         if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
@@ -50,12 +53,11 @@ public final class QueryCommands implements CommandExecutor, AutoCloseable {
             } else {
                 LookupRenderer.send(sender,LookupRenderer.notice("正在重载配置与数据库连接…"));
                 try {
-                    plugin.reloadAddon();
-                    LookupRenderer.send(sender,LookupRenderer.notice("重载完成：配置与数据库连接已更新，旧面板及查询会话已清理。"));
-                } catch (Exception ex) {
-                    plugin.getLogger().log(java.util.logging.Level.WARNING,"COQ reload failed",ex);
-                    LookupRenderer.send(sender,LookupRenderer.notice("重载失败，已保留原配置与连接。请检查配置和服务器日志。"));
-                }
+                    plugin.reloadAddon(failure -> LookupRenderer.send(sender,LookupRenderer.notice(failure == null
+                            ? "重载完成：配置与数据库连接已更新，旧面板及查询会话已清理。"
+                            : "重载失败，已保留原配置与连接。请检查配置和服务器日志。")));
+                } catch (QueryException ex) { LookupRenderer.send(sender,LookupRenderer.notice(ex.getMessage())); }
+
             }
             return true;
         }
@@ -78,7 +80,7 @@ public final class QueryCommands implements CommandExecutor, AutoCloseable {
             return true;
         }
         String key = senderKey(sender);
-        if (pending.contains(key) || (sender instanceof Player player && panels.busy(player))) {
+        if (pending.contains(key) || plugin.queryTasks().busy(key) || (sender instanceof Player player && panels.busy(player))) {
             LookupRenderer.send(sender, LookupRenderer.notice("上一条查询仍在执行，请稍候。"));
             return true;
         }
@@ -117,9 +119,9 @@ public final class QueryCommands implements CommandExecutor, AutoCloseable {
             pending.add(key);
             LookupRenderer.send(sender, LookupRenderer.notice("正在查询…"));
             try {
-                Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                    if (closed) return;
-                    LookupResult result = queryService.lookup(session.request(), session.anchor());
+                plugin.queryTasks().submit(key,QueryLimits.configured().timeoutSeconds(),
+                        cancellation -> queryService.lookup(session.request(), session.anchor(),cancellation), (queried,failure) -> {
+                    LookupResult result = failure == null ? queried : failed(session.request(),failure);
                     if (closed || !plugin.isEnabled()) return;
                     Bukkit.getScheduler().runTask(plugin, () -> {
                         if (closed) return;
@@ -154,7 +156,18 @@ public final class QueryCommands implements CommandExecutor, AutoCloseable {
         }
         return true;
     }
-    @Override public void close() { closed = true; panels.close(); preparation.close(); pending.clear(); sessions.clear(); }
+    @Override public void close() {
+        closed = true; pending.forEach(plugin.queryTasks()::cancel);
+        panels.close(); debug.close(); preparation.close(); pending.clear(); sessions.clear();
+        org.bukkit.event.HandlerList.unregisterAll(this);
+    }
+    @org.bukkit.event.EventHandler public void quit(org.bukkit.event.player.PlayerQuitEvent event) {
+        String key = senderKey(event.getPlayer()); plugin.queryTasks().cancel(key); pending.remove(key);
+    }
+    static LookupResult failed(LookupRequest request,Throwable failure) {
+        QueryException error = failure instanceof QueryException q ? q : new QueryException("QUERY_FAILED","查询失败，请查看服务器日志。");
+        return LookupResult.failure(request.action(),error.code(),error.getMessage(),request.page(),request.pageSize(),0);
+    }
 
     static String senderKey(CommandSender sender) {
         if (sender instanceof Player player) return "player:" + player.getUniqueId();

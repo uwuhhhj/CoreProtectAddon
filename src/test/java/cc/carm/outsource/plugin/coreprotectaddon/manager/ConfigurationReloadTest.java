@@ -12,6 +12,33 @@ import static org.junit.Assert.*;
 public class ConfigurationReloadTest {
     @Rule public TemporaryFolder temporary = new TemporaryFolder();
 
+    @Test public void detachedLoadDoesNotPublishCandidateUntilAppliedAndCanRollBack() throws Exception {
+        var file = temporary.newFile("staged.yml").toPath();
+        Files.writeString(file,"query:\n  page-size: 12\nitem-panel:\n  component-whitelist: [minecraft:map_id]\n");
+        var holder = MineConfiguration.from(file.toFile(),"UTF-8"); holder.initialize(PluginConfig.class);
+        Files.writeString(file,"query:\n  page-size: 21\nitem-panel:\n  component-whitelist: [minecraft:custom_data]\n");
+        var staged = ConfigurationReload.read(file);
+        assertEquals(Integer.valueOf(12),PluginConfig.QUERY.PAGE_SIZE.getNotNull());
+        try (var rollback = new ConfigurationReload(holder)) {
+            ConfigurationReload.apply(holder,staged); ConfigurationReload.validate();
+            assertEquals(Integer.valueOf(21),PluginConfig.QUERY.PAGE_SIZE.getNotNull());
+            assertEquals(java.util.List.of("minecraft:custom_data"),PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy());
+        }
+        assertEquals(Integer.valueOf(12),PluginConfig.QUERY.PAGE_SIZE.getNotNull());
+        assertEquals(java.util.List.of("minecraft:map_id"),PluginConfig.ITEM_PANEL.COMPONENT_WHITELIST.copy());
+        ConfigurationReload.apply(holder,staged);
+        assertEquals(Integer.valueOf(21),PluginConfig.QUERY.PAGE_SIZE.getNotNull());
+    }
+
+    @Test public void detachedMessagesPreserveTextContents() throws Exception {
+        var file = temporary.newFile("messages.yml").toPath(); Files.writeString(file,"no-permission: before\n");
+        var holder = MineConfiguration.from(file.toFile(),"UTF-8");
+        holder.initialize(cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages.class);
+        Files.writeString(file,"no-permission: [after, second]\n");
+        ConfigurationReload.apply(holder,ConfigurationReload.read(file));
+        assertEquals(java.util.List.of("after","second"),cc.carm.outsource.plugin.coreprotectaddon.conf.PluginMessages.NO_PERMISSION.getNotNull().lines());
+    }
+
     @Test public void failedReloadRestoresCachedValuesAndSourceWithoutOverwritingEditedFile() throws Exception {
         var file = temporary.newFile("config.yml").toPath();
         Files.writeString(file,"query:\n  page-size: 12\n  session-ttl-seconds: 60\ndatabase-type: mysql\n");

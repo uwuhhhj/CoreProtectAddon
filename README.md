@@ -1,10 +1,14 @@
-# CoreProtectAddon / COQ 1.6.1
+# CoreProtectAddon / COQ 1.6.2
+
+**使用教程：[管理员指令教程](docs/COMMAND_GUIDE.md)** — 从附近查询、箱子物品追踪到自定义组件筛选，包含操作示例、面板说明和常见问题。
+
+1.6.2 将数据库初始化、重载连接检查、连接关闭和白名单文件写入移到后台；增加有界查询队列、取消控制及元数据内存限制，并将组件快照比较、详情和 debug 文本生成移到工作线程。保持已有查询语法，详见下方“线程与负载控制”。
 
 1.6.1 支持组件名存在性筛选、`组件=值` 简写，以及递归查找配置白名单组件内的完整字符串值；debug 可分行复制全部有效组件，并通过按钮保存白名单增删。保留 1.6.0 的统一多来源查询能力。
 
 1.6.0 重构 lookup 为统一的多来源查询，新增附近/半径/WE 选区、方块/交互/击杀/背包/招牌/登录/改名记录及计数。
 
-COQ 是独立的 CoreProtect 数据库查询插件。使用 CoreProtect 风格的 lookup 参数与交互，支持聊天、命令、物品与容器记录，查询 MariaDB/MySQL、ClickHouse 或 DuckDB；不调用 `/co lookup`，不共用 CoreProtect 查询缓存。编译依赖为 CoreProtect 24.0，现有 AstrBot Java API 保持兼容。
+COQ 是独立执行查询的 CoreProtect 附属插件。使用 CoreProtect 风格的 lookup 参数与交互，支持方块、交互、击杀、背包、聊天、命令、物品、容器、招牌、登录/退出及改名记录，查询 MariaDB/MySQL、ClickHouse 或 DuckDB；不调用 `/co lookup`，不共用 CoreProtect 查询缓存。编译依赖为 CoreProtect 24.0，现有 AstrBot Java API 保持兼容。
 
 1.5.0 使用 `content:` 查询历史物品的全部有效组件（包含默认值），面板点击只输出配置白名单中的组件，每行复制完整条件，坐标点击执行 `/tppos x y z`。筛选、悬停和面板共用 `ItemSnapshot` 历史数据。
 
@@ -12,12 +16,48 @@ COQ 是独立的 CoreProtect 数据库查询插件。使用 CoreProtect 风格�
 
 1.3.0 新增针对已提供的 `CoreProtect-24.0-patched.jar` 的 DuckDB 只读查询。自动定位 CoreProtect 数据目录中的现有文件及运行时表前缀，复用其数据库实例，为每次查询建立独立的 `READ ONLY` 事务。MySQL/MariaDB、ClickHouse 及已有查询功能保留，切换不会迁移历史数据。
 
+## 与 CoreProtect 本体的关系
+
+本节比较当前 COQ 与 CoreProtect 本体，不是与 CoreProtectAddon 早期上游版本比较。CoreProtect 负责记录事件，并提供检查、查询、回滚和恢复；COQ 读取其已有日志，提供独立查询、历史物品组件筛选和查看功能。两者可以配合使用：一般检查与回滚使用 `/co`，需要组件筛选或物品面板时使用 `/coq`。本体命令见 [CoreProtect 官方文档](https://docs.coreprotect.net/commands/)。
+
+### 共同点与分工
+
+| 方面 | CoreProtect 本体 | 当前 COQ |
+| --- | --- | --- |
+| 历史数据 | 记录服务器事件并保存日志 | 读取配置所指向的 CoreProtect 表或兼容视图，不另建一份事件日志 |
+| 查询习惯 | `/co lookup`，按玩家、时间、动作、类型和范围筛选 | `/coq lookup`，沿用相近参数、动作语义、半径和 WE 选区用法；兼容边界见下文 |
+| 执行方式 | 本体的查询流程 | 自己解析参数、执行 SQL、维护分页会话和渲染结果 |
+| 管理操作 | 检查器、回滚、恢复、清理日志等 | 不提供上述操作，不接管日志记录、数据库迁移或清理 |
+| 物品调查 | 提供物品、容器等历史记录查询 | 增加组件存在性、完整组件值及白名单内嵌套字符串筛选，配合历史物品悬停、箱子面板和条件复制 |
+| 配置与权限 | 本体配置及权限 | 独立配置、`coreprotectaddon.command.*` 权限和 `/coq reload`；两者重载互不代替 |
+
+COQ 不会补记历史：目标数据库中未记录、尚未写入或已被清理的事件无法查询；CoreProtect 未保存的物品信息也不能凭空恢复。两个入口只有在指向同一份数据、使用等价条件且未触及各自限制时，才适合对照结果，不应仅因命令相似就假定结果完全相同。
+
+### 独立查询的依赖与边界
+
+- **执行路径独立，部分能力仍依赖本体。** `plugin.yml` 将 CoreProtect 声明为可选依赖（`softdepend`），但历史物品元数据还原会调用本体的 `RollbackUtil.populateItemStack`，方块组展开也使用本体定义，不能据此认为所有功能都能脱离 CoreProtect 运行。MySQL/MariaDB、ClickHouse 读取 Addon 自己的连接配置；DuckDB 必须复用已启用、接口兼容的特定 CoreProtect 构建的数据库实例。详见[配置](#配置)。
+- **参数兼容有范围。** COQ 默认要求 `t:`（可通过 `query.require-time` 调整），`c:` 始终表示内容，坐标用 `coord:`；`near` 可附带过滤参数。它没有本体检查器状态，不支持 `u:#container` 或回滚参数 `#preview`。当前以本地 CoreProtect 24.0 数据结构为基准，不保证兼容上游新增表。详见[查询兼容范围](#查询兼容范围)。
+- **数据库只读与领取副本是两回事。** COQ 不修改历史日志，但箱子面板允许创造模式玩家左键领取还原的物品副本，并可重复领取。这会向玩家背包添加物品，不会撤销原交易、扣除其他玩家的物品或回滚容器；不是 CoreProtect 的 rollback/restore。详见[一次性箱子面板](#一次性箱子面板)。
+- **组件搜索不保证比本体查询更快。** 普通条件在 SQL 内筛选；组件条件还需分批读取元数据，并在服务器主线程队列中还原物品、匹配组件。应先用时间、玩家、物品类型缩小范围；候选数和超时限制可能使搜索中止。分页固定时间窗口但不是数据库快照，后续补写或清理仍会影响结果。
+
+### 适合使用 COQ 的场景
+
+同为 `paper` 的物品可能属于不同自定义道具。把保存标识的 `minecraft:custom_data` 加入 `item-panel.component-whitelist` 后，可以按完整字符串值查找某个道具；也可按地图编号定位记录：
+
+```text
+/coq l a:item t:1d i:paper content:"smc:dou_dizhu_table"
+/coq l a:item t:1d content:map_id=101205
+/coq items
+```
+
+第一条在白名单组件内递归匹配字符串值，不依赖 CraftEngine，也不是子串搜索；第二条要求 `minecraft:map_id` 的值匹配。每次新查询会替换最近查询，`/coq items` 打开最近一次物品/容器查询的面板，可查看组件并复制条件继续筛选。完整规则见 [content 组件搜索](#content-组件搜索)。
+
 ## 命令
 
 需要 `coreprotectaddon.command.query` 权限，默认 OP 可用。
 
 `/coq` 显示常用命令首页，`/coq help [1-3]` 分为查询入门、筛选与组件、面板与管理，游戏内支持点击填入命令和帮助翻页。
-`/coq reload` 使用独立权限 `coreprotectaddon.command.reload`（默认 OP）。它重载配置、消息与数据库连接；成功后关闭旧面板、清空旧会话并丢弃晚到查询结果，需重新查询；失败保留旧配置与连接，修正文件后可再次重载。
+`/coq reload` 使用独立权限 `coreprotectaddon.command.reload`（默认 OP）。它在后台读取配置、消息并建立和检查候选数据库连接，验证成功后才在主线程切换；期间旧配置与连接继续提供查询。成功后关闭旧面板、清空旧会话、取消旧任务并丢弃晚到结果，需重新查询；失败保留旧配置与连接，修正文件后可再次重载。重载和白名单保存串行执行，重复操作会提示稍候。
 
 ```text
 /coq
@@ -51,14 +91,14 @@ COQ 是独立的 CoreProtect 数据库查询插件。使用 CoreProtect 风格�
 | `u:` | `user:`、`users:`、`p:` | 玩家名，支持逗号列表；多个玩家取并集 |
 | `t:` | `time:` | 支持 `1h`、`1.5h`、`1d2h`、`1w`、`10d-12d`；单位为 `y/mo/w/d/h/m/s` |
 | `a:` | `action:` | 选择记录类型与动作方向 |
-| `i:` | `include:`、`item:`、`items:`、`b:`、`block:`、`blocks:` | 包含的 material；多个物品取并集 |
+| `i:` | `include:`、`item:`、`items:`、`b:`、`block:`、`blocks:` | 包含的物品/方块或实体类型；列表取并集，不混用已识别的实体与物品 |
 | `e:` | `exclude:` | 排除物品、实体或玩家；排除优先于包含 |
-| `content:` | `c:`、`message:`、`m:`、`command:` | chat/command 使用数据库正则（含空格加引号）；item/container 使用完整组件 SNBT 条件 |
+| `content:` | `c:`、`message:`、`m:`、`command:` | chat/command/sign 使用数据库正则（含空格加引号）；item/container 支持组件存在性、完整值、物品 ID 及白名单内字符串值筛选，见下文 |
 | `page:` | — | 新查询中的页码，如 `page:2`、`page:2:30`；单独 `/coq l page:2` 继续最近查询 |
 | `rows:` | — | 新查询每页条数，也可以使用 `page:1:30` |
 | `r:` | `radius:` | 半径、WE 选区、世界或 #global |
 | `world:` | `w:` | 世界名 |
-| `coord:` | `coords:`、`location:`、`loc:`、`position:` | 查询中心；c: 保留为内容筛选 |
+| `coord:` | `coords:`、`coordinate:`、`coordinates:`、`location:`、`loc:`、`position:` | 查询中心；c: 保留为内容筛选 |
 
 `p:` 按 CoreProtect 语义表示玩家，不表示页码。重复参数、拼错的键、无效列表及不适用于当前类型的条件会报错。普通物品支持 `iron_ingot` 和 `minecraft:iron_ingot`。
 
@@ -126,8 +166,8 @@ Tab 补全后只填组件名，就筛选所有拥有该有效组件的物品；�
 手动修改配置后执行 `/coq reload` 即可更新补全、面板展示与省略路径的值搜索范围。也可从 debug 的组件行直接增删白名单；显式组件条件不受白名单限制。
 
 `/coq debug item [页码]`（也可直接 `/coq debug`）查看当前主手物品全部有效组件，包括默认值，不受白名单和面板 12 项限制。
-每页 10 个组件，每行提供 `[复制值]` 和 `[复制条件]`；预览省略不会截断复制内容。翻页重新读取当前主手物品。
-拥有 `coreprotectaddon.command.reload` 权限时，每行额外提供 `[加入白名单]`、`[移出白名单]` 两个按钮，保存到配置文件的 `item-panel.component-whitelist` 并立即更新补全与面板，无须手动重载；重复点击不会产生重复项。
+每页 10 个组件，每行提供 `[复制值]` 和 `[复制条件]`；预览省略不会截断复制内容。翻页重新读取当前主手物品，但仅编码当前页的组件；编码进入共享主线程队列，详情文本和复制条件在工作线程生成。
+拥有 `coreprotectaddon.command.reload` 权限时，每行额外提供 `[加入白名单]`、`[移出白名单]` 两个按钮，在后台保存到配置文件的 `item-panel.component-whitelist`，保存成功后更新补全与面板，无须手动重载；重复点击不会产生重复项。
 也可使用 `/coq debug whitelist add <组件名>` 或 `/coq debug whitelist remove <组件名>`。
 使用独立权限 `coreprotectaddon.command.debug`，默认 OP；空手或控制台执行会提示。无需 `/paper dumpitem`。
 
@@ -160,13 +200,23 @@ COQ 标题、玩家及 material 使用深青色，正文白色、时间灰色，
 
 非创造模式左键 / 右键、创造模式右键点击物品，输出记录 ID、玩家、动作、物品数量、时间、世界、页码和配置白名单中的组件。坐标按钮执行 `/tppos x y z`（由服务器现有传送命令处理权限及所在世界）。组件行显示截短预览，点击复制完整 SNBT 条件；不会输出全部组件清单。超过条件长度上限的值明确标记，不能复制成一个不完整条件。
 
-面板只保留当前页；关闭、退出服务器、换查询或插件停用后清空物品、取消待还原任务并释放数据。关闭后的异步 SQL 结果会被丢弃，不会重新打开面板。原有轻量查询会话仍保留到过期，方便重新查询；面板和物品本身不缓存。创造模式左键领取历史物品副本到背包，保留原组件，数量与当前格显示一致（不超过单组上限），历史展示保留，可以再次领取。背包满时提示，不覆盖物品或掉落副本；无法还原的占位物品不能领取。其他模式仅查看；快捷栏交换、Shift、双击、丢弃与拖拽继续取消，导航按钮不能取出。
+面板只保留当前页；关闭、退出服务器、换查询或插件停用后清空物品、取消待还原任务并释放数据。关闭后的异步 SQL 结果会被丢弃，不会重新打开面板。原有轻量查询会话仍保留到过期，方便重新查询；面板和物品本身不缓存。关闭时请求取消未完成的查询，旧任务实际退出前不能再次提交同一玩家的查询。创造模式左键领取历史物品副本到背包，保留原组件，数量与当前格显示一致（不超过单组上限），历史展示保留，可以再次领取。背包满时提示，不覆盖物品或掉落副本；无法还原的占位物品不能领取。其他模式仅查看；快捷栏交换、Shift、双击、丢弃与拖拽继续取消，导航按钮不能取出。
 
-SQL 查询异步执行。聊天悬停、箱子面板、点击详情与组件筛选共用一个轮转队列，所有玩家合计每 tick 最多处理 2 件，在每件操作后检查 2ms 时间预算。筛选仅编码所选组件，不生成悬停对象；展示不预读下一页。单次 Bukkit/组件编码操作无法中途抢占，因此不是绝对 2ms 的耗时保证；序列化体积和对象深度另有限制。翻页期间禁止重复提交，同一面板点击有 250ms 间隔。
+SQL 查询异步执行。组件条件每次查询只编译一次，固定该次搜索的白名单；主线程仅还原并提取需要的组件，交接后的独立 NBT 数据只读，值比较与嵌套字符串搜索在工作线程执行，不访问实时物品或注册表。面板详情的文本和复制条件也在工作线程生成。聊天悬停、箱子面板、点击详情、debug 与组件提取共用一个轮转队列，所有玩家合计每 tick 最多处理 2 件，在每件操作后检查 2ms 时间预算。筛选仅编码所选组件，不生成悬停对象；展示不预读下一页。单次 Bukkit/组件编码操作无法中途抢占，因此不是绝对 2ms 的耗时保证；序列化体积和对象深度另有限制。翻页期间禁止重复提交，同一面板点击有 250ms 间隔。
 
-组件搜索最多检查 `query.component-max-candidates` 条候选，且包含主线程排队的整个查询受 `query.timeout-seconds` 约束。超过任一上限会报“搜索未完成”，不返回假空结果或不完整总数；请优先缩小时间、玩家和物品条件。搜索临时持有一个候选批次和目标页，不缓存全部物品；关闭面板不再显示晚到结果，已经开始的搜索仍受上述预算限制。
+组件搜索最多检查 `query.component-max-candidates` 条候选，且包含主线程排队的整个查询受 `query.timeout-seconds` 约束。超过任一上限会报“搜索未完成”，不返回假空结果或不完整总数；请优先缩小时间、玩家和物品条件。搜索临时持有一个候选批次和目标页，不缓存全部物品；关闭面板会请求取消搜索，不再显示晚到结果；已经进入 JDBC 或单件物品还原的操作仍须等待驱动响应或当前操作返回，不承诺瞬间终止。
 
 查询在异步线程运行，消息在服务器主线程发送；同一发送者的前一条查询结束前不再提交另一条。无记录、无最近查询、查询过期、越界、数据库错误和超时分别处理。
+
+## 线程与负载控制
+
+- 启动时异步初始化数据库，未完成时 `/coq` 提示稍候；就绪后注册完整查询入口。重载连接检查、旧连接关闭和白名单文件写入也在后台执行，主线程不等待 JDBC。主线程仍负责游戏状态、配置发布、物品还原和组件提取。
+- 命令、面板与详情使用插件级工作池：2 个工作线程、最多 8 个排队任务，满载时明确提示繁忙。每个发送者只允许一个尚未结束的数据库任务；关闭面板、退出或重载会请求取消，任务实际退出前保留名额。独立 Java lookup API 也受最多 2 个并发数据库查询的限制，不得在主线程调用，误用返回 `ASYNC_REQUIRED`。
+- 命令查询的时限从提交队列时开始，包含排队、SQL 和组件处理等待。取消采用协作检查与工作线程中断，主线程不会调用可能阻塞的 JDBC 取消方法。连接等待、驱动取消和单件服务器 API 调用不属于可强制抢占的操作，因此超时不是绝对的墙钟耗时保证。
+- 普通分页与组件候选批次先查询元数据字节数，再读取 BLOB。单条超过 8 MiB 时不加载其 BLOB，展示为无法还原；组件搜索遇到该记录仍明确失败，不当作不匹配。每批读取及组件查询保留的结果页各限制为 16 MiB，超限提示减少范围或每页条数，避免仅靠记录数量限制内存。
+- MySQL/MariaDB JDBC URL 未显式设置 `connectTimeout`、`socketTimeout` 时，默认按查询时限补齐；显式值保持原样。只读查询仍与本体共享数据库资源，异步、有界队列和超时用于控制影响，不保证零卡顿或完全不影响日志写入。
+
+组件查询当前仍为计算总数而扫描候选，翻页、打开面板会重新查询。上述改动没有增加全量结果缓存或改变历史物品的解释规则。线程与故障场景验证见[健壮性验证](docs/ROBUSTNESS_TESTING.md)。
 
 ## 配置
 
@@ -238,7 +288,7 @@ item-panel:
   component-preview-length: 100
 ```
 
-白名单控制组件补全与面板点击后的聊天输出，面板按配置顺序去重、最多取前 12 个，不存在的组件跳过；空列表仅输出记录信息。可添加 `minecraft:max_stack_size` 等默认组件。预览长度限制为 20–300，复制不截断；手动修改后 `/coq reload`，debug 按钮修改立即保存生效。
+白名单控制组件补全、面板点击后的聊天输出以及省略路径的字符串值搜索范围。面板按配置顺序去重、最多取前 12 个，不存在的组件跳过；值搜索使用整个名单。空列表使面板详情仅输出记录信息，并关闭省略路径的值搜索；显式组件条件不受白名单限制。可添加 `minecraft:max_stack_size` 等默认组件。预览长度限制为 20–300，复制不截断；手动修改后 `/coq reload`，debug 按钮修改立即保存生效。
 
 限制同时适用于 lookup 和旧 Java API。`max-time-seconds` 限制区间宽度，不限制记录距今多远，因而 `10d-12d` 可以查询。关闭 `require-time` 后可省略时间条件，此时仍受页大小、可浏览数量和超时限制。旧 `reverse-order` 配置保留，但 lookup 固定倒序。
 
@@ -250,14 +300,14 @@ ClickHouse 读取 CoreProtect 提供的兼容视图（包括其 `FINAL` 语义�
 
 ## Java API 与代码结构
 
-原有六参数 `QueryRequest(QueryType, String, String, Integer, Integer, String)`、`Main.query(QueryRequest)`、`QueryResult` 和 `QueryRecord` 保持签名不变，AstrBot 的 chat/command 反射调用无需修改。新增的统一限制也会约束这些调用，尤其是默认必须传入时间条件。该 API 是同步的，调用者须继续在异步线程使用。
+原有六参数 `QueryRequest(QueryType, String, String, Integer, Integer, String)`、`Main.query(QueryRequest)`、`QueryResult` 和 `QueryRecord` 保持签名不变，AstrBot 的 chat/command 反射调用无需修改。新增的统一限制也会约束这些调用，尤其是默认必须传入时间条件。该 API 是同步的，调用者须继续在异步线程使用；主线程调用返回 `ASYNC_REQUIRED`。启动初始化期间 `Main.query` 返回 `NOT_READY`，使用 `Main.getQueryService()` 的调用者须等待服务就绪。
 
 物品通过独立的 `api.lookup.LookupRequest` / `LookupRecord` / `LookupResult` 及 `Main.getQueryService().lookup(request)` 查询，不借用旧 API 的 message 字段。
 
 ```text
 QueryCommands + LookupParameters + QueryTabCompleter
   -> CoreProtectQueryService（使用 DataManager 选择的数据源）
-  -> MariaDB/MySQL SELECT 或 ClickHouse 兼容视图 SELECT
+  -> MariaDB/MySQL SELECT、ClickHouse 兼容视图 SELECT 或 DuckDB 只读事务 SELECT
   -> LookupResult -> LookupRenderer
 
 LookupSessions：每个发送者的固定时间与分页状态
@@ -274,13 +324,13 @@ QueryLimits：命令和 Java API 共用限制
 mvn package
 ```
 
-产物为 `.asset/CoreProtectAddon-1.6.1.jar`。沿用项目现有的 Paper API 依赖和编译环境；本次本地构建使用 JDK 26。Maven 默认运行无需服务器的解析、补全、会话、动作映射、渲染及限制测试，以及旧配置兼容、ClickHouse JDBC HTTP 协议测试和真实 DuckDB 1.4.5.0 临时数据库测试。DuckDB 测试覆盖只读约束、文件路径、读写共存、生命周期、查询结果和实际超时中断；ClickHouse 测试使用本地 HTTP fixture，不执行真正的 ClickHouse SQL。真实服务器验收步骤见上方文档。
+产物为 `.asset/CoreProtectAddon-1.6.2.jar`。沿用项目现有的 Paper API 依赖和编译环境；本次本地构建使用 JDK 26。Maven 默认运行无需服务器的解析、补全、会话、动作映射、渲染及限制测试，以及旧配置兼容、ClickHouse JDBC HTTP 协议测试和真实 DuckDB 1.4.5.0 临时数据库测试。DuckDB 测试覆盖只读约束、文件路径、读写共存、生命周期、查询结果和实际超时中断；ClickHouse 测试使用本地 HTTP fixture，不执行真正的 ClickHouse SQL。1.6.2 未完成 Paper 实机验收；验证范围与限制见[健壮性验证](docs/ROBUSTNESS_TESTING.md)。
 
 若 IDE 同时往 `target/classes` 写入编译结果，可用 `mvn -Dcoq.build.directory=target/verify-clickhouse package` 独立构建；这也会保留 `target/config.yml` 等参考文件。打包后可验证隔离环境仅靠 JAR 中的驱动完成连接：
 
 ```shell
 mvn -Dcoq.build.directory=target/verify-duckdb -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar package
-mvn -Dcoq.build.directory=target/verify-duckdb -Dtest=ClickHouseTest,DuckDBTest -Dcoq.test.pluginJar=.asset/CoreProtectAddon-1.6.1.jar -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar test
+mvn -Dcoq.build.directory=target/verify-duckdb -Dtest=ClickHouseTest,DuckDBTest -Dcoq.test.pluginJar=.asset/CoreProtectAddon-1.6.2.jar -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar test
 ```
 
 只在本机临时实例建立空的 `coq_fixture` 数据库（测试默认 root / 空密码），然后运行：
