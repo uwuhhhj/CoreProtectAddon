@@ -147,7 +147,13 @@ final class ItemPreparationQueue implements AutoCloseable {
     private static Prepared prepare(LookupRecord record,boolean hover) {
         try {
             ItemStack item = HistoricalItemDecoder.decode(record);
-            return new Prepared(item, hover ? item.asHoverEvent() : null);
+            ItemStack hoverItem = item;
+            // Paper SHOW_ITEM accepts at most 99; history may aggregate multiple stacks.
+            if (hover && item.getAmount() > 99) {
+                hoverItem = item.clone();
+                hoverItem.setAmount(64);
+            }
+            return new Prepared(item, hover ? hoverItem.asHoverEvent() : null);
         } catch (Exception | LinkageError ex) {
             return new Prepared(null, HoverEvent.showText(Component.text(
                     "此条历史物品详情无法还原（元数据损坏或版本不兼容）。", NamedTextColor.RED)));
