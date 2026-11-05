@@ -20,7 +20,7 @@
     </properties>
     <groupId>cc.carm.outsource</groupId>
     <artifactId>coreprotectaddon</artifactId>
-    <version>1.6.2</version>
+    <version>1.6.4</version>
 
     <name>CoreProtectAddon</name>
     <description>
@@ -114,6 +114,14 @@
     </repositories>
 
     <dependencies>
+
+        <!-- Paper supplies the same SQLite driver used by CoreProtect. -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.43.0.0</version>
+            <scope>provided</scope>
+        </dependency>
 
         <!-- The relocated SLF4J API needs its own provider. Route dependency
              logs to JUL, which the server already handles, instead of NOP. -->

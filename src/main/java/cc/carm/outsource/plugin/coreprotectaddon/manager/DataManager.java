@@ -29,9 +29,15 @@ public class DataManager {
     private final QueryLimits queryLimits;
     private final int componentMaxCandidates;
     @FunctionalInterface public interface DuckFactory { DuckDBReadOnlyDataSource open() throws Exception; }
+    @FunctionalInterface public interface SQLiteFactory { SQLiteReadOnlyDataSource open() throws Exception; }
     public record Settings(DatabaseType type, Tables tables, QueryLimits limits, int candidates,
             String driver, String jdbc, String username, String password, boolean debug,
-            ClickHouseConnectionSettings clickhouse, DuckFactory duck) {
+            ClickHouseConnectionSettings clickhouse, DuckFactory duck, SQLiteFactory sqlite) {
+        public Settings(DatabaseType type, Tables tables, QueryLimits limits, int candidates,
+                        String driver, String jdbc, String username, String password, boolean debug,
+                        ClickHouseConnectionSettings clickhouse, DuckFactory duck) {
+            this(type, tables, limits, candidates, driver, jdbc, username, password, debug, clickhouse, duck, null);
+        }
         /** Capture on the server thread; connecting and validating happen later on a worker. */
         public static Settings capture() throws Exception {
             DatabaseType type = DatabaseType.parse(PluginConfig.DATABASE_TYPE.getNotNull());
@@ -41,16 +47,19 @@ public class DataManager {
                             PluginConfig.CLICKHOUSE_DATABASE.getNotNull(),PluginConfig.CLICKHOUSE_USERNAME.getNotNull(),
                             PluginConfig.CLICKHOUSE_PASSWORD.getNotNull(),PluginConfig.CLICKHOUSE_TLS.getNotNull(),limits.timeoutSeconds());
             DuckFactory duck = null;
-            if (type == DatabaseType.DUCKDB) {
+            SQLiteFactory sqlite = null;
+            if (type == DatabaseType.DUCKDB || type == DatabaseType.SQLITE) {
                 var plugin = org.bukkit.Bukkit.getPluginManager().getPlugin("CoreProtect");
-                if (plugin == null || !plugin.isEnabled()) throw new SQLException("DuckDB 模式需要已启用的 CoreProtect。");
+                if (plugin == null || !plugin.isEnabled()) throw new SQLException(type + " 模式需要已启用的 CoreProtect。");
                 var loader = plugin.getClass().getClassLoader();
                 var folder = plugin.getDataFolder().toPath();
-                duck = () -> DuckDBReadOnlyDataSource.fromRuntime(loader,folder,plugin::isEnabled);
+                if (type == DatabaseType.DUCKDB)
+                    duck = () -> DuckDBReadOnlyDataSource.fromRuntime(loader,folder,plugin::isEnabled);
+                else sqlite = () -> SQLiteReadOnlyDataSource.fromRuntime(loader,folder,plugin::isEnabled,limits.timeoutSeconds());
             }
-            return new Settings(type,Tables.configured(),limits,PluginConfig.QUERY.COMPONENT_MAX_CANDIDATES.getNotNull(),
+            return new Settings(type,type == DatabaseType.DUCKDB || type == DatabaseType.SQLITE ? null : Tables.configured(),limits,PluginConfig.QUERY.COMPONENT_MAX_CANDIDATES.getNotNull(),
                     PluginConfig.DATABASE.DRIVER_NAME.getNotNull(),boundedJdbc(PluginConfig.DATABASE.buildJDBC(),limits.timeoutSeconds()),
-                    PluginConfig.DATABASE.USERNAME.getNotNull(),PluginConfig.DATABASE.PASSWORD.getNotNull(),PluginConfig.DEBUG.resolve(),clickhouse,duck);
+                    PluginConfig.DATABASE.USERNAME.getNotNull(),PluginConfig.DATABASE.PASSWORD.getNotNull(),PluginConfig.DEBUG.resolve(),clickhouse,duck,sqlite);
         }
     }
     static String boundedJdbc(String jdbc,int seconds) {
@@ -68,6 +77,12 @@ public class DataManager {
                 dataSource = source; tables = Tables.prefixed(source.tablePrefix());
                 try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {
                     statement.setQueryTimeout(queryLimits.timeoutSeconds()); validateTables(statement,tables,"\"");
+                }
+            } else if (settings.type() == DatabaseType.SQLITE) {
+                SQLiteReadOnlyDataSource source = settings.sqlite().open();
+                dataSource = source; tables = Tables.prefixed(source.tablePrefix());
+                try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {
+                    statement.setQueryTimeout(queryLimits.timeoutSeconds()); validateTables(statement,tables,"`");
                 }
             } else {
                 tables = settings.tables();
@@ -100,6 +115,10 @@ public class DataManager {
             try { source.close(); }
             catch (SQLException ex) { Main.severe("关闭 DuckDB 查询连接失败：" + ex.getMessage()); }
         }
+        if (this.dataSource instanceof SQLiteReadOnlyDataSource source) {
+            try { source.close(); }
+            catch (SQLException ex) { Main.severe("关闭 SQLite 查询连接失败：" + ex.getMessage()); }
+        }
         this.sqlManager = null;
         // DataSourceImpl owns no pool; each JDBC connection owns and closes its HTTP client.
         this.dataSource = null;
@@ -125,6 +144,8 @@ public class DataManager {
         }
         if ("duckdb".equalsIgnoreCase(PluginConfig.DATABASE_TYPE.getNotNull().trim()))
             return "DuckDB 只读连接失败：" + failure.getMessage();
+        if ("sqlite".equalsIgnoreCase(PluginConfig.DATABASE_TYPE.getNotNull().trim()))
+            return "SQLite 只读连接失败：" + failure.getMessage();
         return "无法连接到数据库，请检查配置文件。";
     }
 

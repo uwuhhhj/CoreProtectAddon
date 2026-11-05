@@ -144,11 +144,11 @@ final class LookupPlan {
         }
         String message=source.equals("chat") || source.equals("command") ? "`message`" : "''";
         if (source.equals("sign")) {
-            StringBuilder front=new StringBuilder("CONCAT("),back=new StringBuilder("CONCAT(");
+            StringBuilder front=new StringBuilder(sql.sqlite ? "(" : "CONCAT("),back=new StringBuilder(sql.sqlite ? "(" : "CONCAT(");
             StringJoiner nonempty=new StringJoiner(" OR "," AND (",")");
             for(int i=1;i<=8;i++) {
                 StringBuilder side=i<=4 ? front : back;
-                if(i!=1 && i!=5)side.append(",' ',");
+                if(i!=1 && i!=5)side.append(sql.sqlite ? " || ' ' || " : ",' ',");
                 side.append("COALESCE(`line_").append(i).append("`,'')");
                 nonempty.add("LENGTH(`line_"+i+"`) > 0");
             }
@@ -183,7 +183,7 @@ final class LookupPlan {
             if(ids.isEmpty())continue;
             String column=source.equals("item")?"data":"metadata";
             // Fetch sizes first: an oversized history row must not be materialized by JDBC just to reject it later.
-            Map<Long,Long> lengths = sql.read("SELECT `rowid`,"+(sql.clickhouse ? "length" : "OCTET_LENGTH")+"(`"+column+"`) AS `coq_metadata_size` FROM "+quote(table(source))
+            Map<Long,Long> lengths = sql.read("SELECT `rowid`,"+(sql.clickhouse || sql.sqlite ? "length" : "OCTET_LENGTH")+"(`"+column+"`) AS `coq_metadata_size` FROM "+quote(table(source))
                     +" WHERE `rowid` IN ("+marks(ids.size())+")",ids,rs -> {
                 Map<Long,Long> sizes = new LinkedHashMap<>();
                 while(rs.next()) sizes.put(rs.getLong("rowid"),rs.getLong("coq_metadata_size"));

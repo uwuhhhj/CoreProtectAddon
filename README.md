@@ -1,6 +1,8 @@
-# CoreProtectAddon / COQ 1.6.2
+# CoreProtectAddon / COQ 1.6.4
 
 **使用教程：[管理员指令教程](docs/COMMAND_GUIDE.md)** — 从附近查询、箱子物品追踪到自定义组件筛选，包含操作示例、面板说明和常见问题。
+
+1.6.4 新增 `database-type: sqlite`，自动读取 CoreProtect 正在使用的 SQLite 文件和表前缀，通过独立只读连接查询。适配招牌文本、物品元数据长度、正则筛选和查询超时。本版本仅进行跳过测试的编译打包，未运行自动化测试或服务器实机验收。
 
 1.6.2 将数据库初始化、重载连接检查、连接关闭和白名单文件写入移到后台；增加有界查询队列、取消控制及元数据内存限制，并将组件快照比较、详情和 debug 文本生成移到工作线程。保持已有查询语法，详见下方“线程与负载控制”。
 
@@ -8,7 +10,7 @@
 
 1.6.0 重构 lookup 为统一的多来源查询，新增附近/半径/WE 选区、方块/交互/击杀/背包/招牌/登录/改名记录及计数。
 
-COQ 是独立执行查询的 CoreProtect 附属插件。使用 CoreProtect 风格的 lookup 参数与交互，支持方块、交互、击杀、背包、聊天、命令、物品、容器、招牌、登录/退出及改名记录，查询 MariaDB/MySQL、ClickHouse 或 DuckDB；不调用 `/co lookup`，不共用 CoreProtect 查询缓存。编译依赖为 CoreProtect 24.0，现有 AstrBot Java API 保持兼容。
+COQ 是独立执行查询的 CoreProtect 附属插件。使用 CoreProtect 风格的 lookup 参数与交互，支持方块、交互、击杀、背包、聊天、命令、物品、容器、招牌、登录/退出及改名记录，查询 MariaDB/MySQL、ClickHouse、DuckDB 或 SQLite；不调用 `/co lookup`，不共用 CoreProtect 查询缓存。编译依赖为 CoreProtect 24.0，现有 AstrBot Java API 保持兼容。
 
 1.5.0 使用 `content:` 查询历史物品的全部有效组件（包含默认值），面板点击只输出配置白名单中的组件，每行复制完整条件，坐标点击执行 `/tppos x y z`。筛选、悬停和面板共用 `ItemSnapshot` 历史数据。
 
@@ -239,7 +241,17 @@ clickhouse-tls: false
 
 要求 ClickHouse 25.6+，以及已经初始化相同数据库和前缀的、具备 ClickHouse 支持的 CoreProtect 构建。仅凭 CoreProtect 的版本号不能确认这一点，应确认运行配置与启动日志。Addon 启动时检查版本和十二个兼容视图，只执行 SELECT，不创建数据库/表，不迁移或清理日志，也不接管 CoreProtect 的写入锁。账号需要对兼容视图及底层数据的适当 SELECT 权限，并允许查询使用超时设置。
 
-MySQL/MariaDB、ClickHouse 模式下，`table-prefix` 留空（默认）时使用 `database.tables` 中的完整表名；非空时统一生成 `<前缀>user/chat/command/item/container/material_map/world/block/entity_map/session/sign/username_log`，覆盖各自表名。切回旧库时设置 `database-type: mysql`，保留旧 `database` 连接设置；如果旧库使用单独配置的表名，将 `table-prefix` 还原成空字符串。切换只改变查询目标，不合并两边的历史记录。SQLite 暂不支持。
+MySQL/MariaDB、ClickHouse 模式下，`table-prefix` 留空（默认）时使用 `database.tables` 中的完整表名；非空时统一生成 `<前缀>user/chat/command/item/container/material_map/world/block/entity_map/session/sign/username_log`，覆盖各自表名。切回旧库时设置 `database-type: mysql`，保留旧 `database` 连接设置；如果旧库使用单独配置的表名，将 `table-prefix` 还原成空字符串。切换只改变查询目标，不合并两边的历史记录。
+
+CoreProtect 使用 `database-type: sqlite` 时，在 **Addon** 的 `plugins/CoreProtectAddon/config.yml` 顶层也设置：
+
+```yaml
+database-type: sqlite
+```
+
+SQLite 模式要求 CoreProtect 已启用并实际运行 SQLite，且提供当前构建的 `ConfigHandler.databaseType/path/sqlite/prefix` 运行时字段。自动定位其数据目录内的现有数据库文件（通常为 `plugins/CoreProtect/database.db`）及实际表前缀，忽略 Addon 的 `database:`、`clickhouse-*` 和 `table-prefix`。通过 Paper 提供的 SQLite JDBC 驱动建立独立只读连接，不创建数据库、不写入历史记录，也不关闭 CoreProtect 的写连接。缺失文件、数据库类型不符、表结构不兼容会停止初始化。
+
+更改 CoreProtect 的数据库类型或目标后，先执行 `/co reload` 或重启服务器，再执行 `/coq reload` 刷新 Addon 连接；仅修改 Addon 配置则执行 `/coq reload`。SQLite 聊天/命令正则使用 Java `Pattern` 的子串匹配，默认区分大小写，可用 `(?i)`；正则最多 4096 字符，执行受查询时限约束。配置片段见 [SQLite 示例](examples/sqlite.yml)。
 
 当前特殊 CoreProtect 实际使用 DuckDB 时，只需在 **Addon** 配置顶层设置：
 
@@ -324,13 +336,13 @@ QueryLimits：命令和 Java API 共用限制
 mvn package
 ```
 
-产物为 `.asset/CoreProtectAddon-1.6.2.jar`。沿用项目现有的 Paper API 依赖和编译环境；本次本地构建使用 JDK 26。Maven 默认运行无需服务器的解析、补全、会话、动作映射、渲染及限制测试，以及旧配置兼容、ClickHouse JDBC HTTP 协议测试和真实 DuckDB 1.4.5.0 临时数据库测试。DuckDB 测试覆盖只读约束、文件路径、读写共存、生命周期、查询结果和实际超时中断；ClickHouse 测试使用本地 HTTP fixture，不执行真正的 ClickHouse SQL。1.6.2 未完成 Paper 实机验收；验证范围与限制见[健壮性验证](docs/ROBUSTNESS_TESTING.md)。
+产物为 `.asset/CoreProtectAddon-1.6.4.jar`。沿用项目现有的 Paper API 依赖和编译环境；本次本地构建使用 JDK 26。1.6.4 使用 `mvn -Dmaven.test.skip=true package` 跳过测试编译与执行。普通 `mvn package` 默认运行无需服务器的解析、补全、会话、动作映射、渲染及限制测试，以及旧配置兼容、ClickHouse JDBC HTTP 协议测试和真实 DuckDB 1.4.5.0 临时数据库测试。DuckDB 测试覆盖只读约束、文件路径、读写共存、生命周期、查询结果和实际超时中断；ClickHouse 测试使用本地 HTTP fixture，不执行真正的 ClickHouse SQL。历史验证范围与限制见[健壮性验证](docs/ROBUSTNESS_TESTING.md)；不代表本次 SQLite 改动已经过测试。
 
 若 IDE 同时往 `target/classes` 写入编译结果，可用 `mvn -Dcoq.build.directory=target/verify-clickhouse package` 独立构建；这也会保留 `target/config.yml` 等参考文件。打包后可验证隔离环境仅靠 JAR 中的驱动完成连接：
 
 ```shell
 mvn -Dcoq.build.directory=target/verify-duckdb -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar package
-mvn -Dcoq.build.directory=target/verify-duckdb -Dtest=ClickHouseTest,DuckDBTest -Dcoq.test.pluginJar=.asset/CoreProtectAddon-1.6.2.jar -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar test
+mvn -Dcoq.build.directory=target/verify-duckdb -Dtest=ClickHouseTest,DuckDBTest -Dcoq.test.pluginJar=.asset/CoreProtectAddon-1.6.4.jar -Dcoq.test.coreprotectJar=.asset/CoreProtect-24.0-patched.jar test
 ```
 
 只在本机临时实例建立空的 `coq_fixture` 数据库（测试默认 root / 空密码），然后运行：

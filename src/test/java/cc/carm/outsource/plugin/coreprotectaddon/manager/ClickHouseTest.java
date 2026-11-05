@@ -31,7 +31,8 @@ public class ClickHouseTest {
         assertEquals(DatabaseType.MYSQL, DatabaseType.parse("MariaDB"));
         assertEquals(DatabaseType.CLICKHOUSE, DatabaseType.parse(" ClickHouse "));
         assertEquals(DatabaseType.DUCKDB, DatabaseType.parse(" DuckDB "));
-        for (String type : List.of("sqlite", "", "typo"))
+        assertEquals(DatabaseType.SQLITE, DatabaseType.parse(" SQLite "));
+        for (String type : List.of("", "typo"))
             assertThrows(IllegalArgumentException.class, () -> DatabaseType.parse(type));
         for (String host : List.of("", "localhost/path", "https://localhost", "localhost?ssl=false", "user@host", " host"))
             assertThrows(host, IllegalArgumentException.class, () -> settings(host, 8123, false));

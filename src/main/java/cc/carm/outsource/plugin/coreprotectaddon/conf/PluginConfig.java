@@ -13,15 +13,16 @@ public interface PluginConfig extends Configuration {
     ConfiguredValue<Boolean> DEBUG = ConfiguredValue.of(Boolean.class, false);
 
     @ConfigPath("database-type")
-    @HeaderComments({"数据库类型：mysql（含 MariaDB）、clickhouse 或 duckdb；修改后执行 /coq reload。",
+    @HeaderComments({"数据库类型：mysql（含 MariaDB）、clickhouse、duckdb 或 sqlite；修改后执行 /coq reload。",
             "默认为 mysql，继续读取下方原有 database 配置；不会迁移历史数据。",
-            "duckdb 复用已启用的 CoreProtect 数据库，以独立只读事务查询，不填写文件路径或账号。"})
+            "duckdb 复用已启用的 CoreProtect 数据库，以独立只读事务查询，不填写文件路径或账号。",
+            "sqlite 自动读取已启用的 CoreProtect 数据库文件及表前缀，建立独立只读连接。"})
     ConfiguredValue<String> DATABASE_TYPE = ConfiguredValue.of("mysql");
 
     @ConfigPath("table-prefix")
     @HeaderComments({"与 CoreProtect 的 table-prefix 一致，例如 co_。",
             "留空时沿用 database.tables 中的完整表名；填写后统一覆盖这些表名。",
-            "duckdb 模式自动使用 CoreProtect 实际运行的表前缀，忽略此项及 database.tables。"})
+            "duckdb/sqlite 模式自动使用 CoreProtect 实际运行的表前缀，忽略此项及 database.tables。"})
     ConfiguredValue<String> TABLE_PREFIX = ConfiguredValue.of("");
 
     @ConfigPath("clickhouse-host")

@@ -4,6 +4,7 @@ import cc.carm.outsource.plugin.coreprotectaddon.api.lookup.*;
 import cc.carm.outsource.plugin.coreprotectaddon.api.query.*;
 import cc.carm.outsource.plugin.coreprotectaddon.conf.PluginConfig;
 import cc.carm.outsource.plugin.coreprotectaddon.manager.DataManager;
+import cc.carm.outsource.plugin.coreprotectaddon.manager.SQLiteQuerySupport;
 
 import javax.sql.DataSource;
 import java.sql.*;
@@ -178,6 +179,7 @@ public class CoreProtectQueryService {
         private final boolean maria;
         final boolean clickhouse;
         final boolean duckdb;
+        final boolean sqlite;
         TimedSelect(Connection connection, long deadline) throws SQLException {
             this(connection,deadline,null);
         }
@@ -192,6 +194,8 @@ public class CoreProtectQueryService {
             String product = meta.getDatabaseProductName().toLowerCase(Locale.ROOT);
             this.clickhouse = product.contains("clickhouse");
             this.duckdb = product.contains("duckdb");
+            this.sqlite = product.contains("sqlite");
+            if (sqlite) SQLiteQuerySupport.configure(connection, deadline);
             this.maria = !clickhouse && !duckdb && (product + " " + meta.getDatabaseProductVersion()).toLowerCase(Locale.ROOT).contains("mariadb");
         }
         <T> T read(String query, List<?> params, Rows<T> reader) throws SQLException {
@@ -201,7 +205,7 @@ public class CoreProtectQueryService {
             // Backticks occur only in generated identifiers; user strings are bound after SQL preparation.
             String timed = duckdb ? query.replace('`', '"') : clickhouse ? query + " SETTINGS max_execution_time=" + (remaining / 1000.0)
                     + ", timeout_overflow_mode='throw', timeout_before_checking_execution_speed=0" :
-                    maria ? "SET STATEMENT max_statement_time=" + (remaining / 1000.0) + " FOR " + query :
+                    sqlite ? query : maria ? "SET STATEMENT max_statement_time=" + (remaining / 1000.0) + " FOR " + query :
                     "SELECT /*+ MAX_EXECUTION_TIME(" + remaining + ") */" + query.substring("SELECT".length());
             try (PreparedStatement statement = connection.prepareStatement(timed)) {
                 statement.setQueryTimeout((int) Math.max(1, (remaining + 999) / 1000));
@@ -216,7 +220,8 @@ public class CoreProtectQueryService {
                 }
             } catch (SQLException ex) {
                 // DuckDB's JDBC timeout interrupts the query but reports a plain SQLException.
-                if (duckdb && System.nanoTime() >= deadline) throw new SQLTimeoutException("DuckDB query deadline expired", ex);
+                if (cancellation != null) cancellation.check();
+                if ((duckdb || sqlite) && System.nanoTime() >= deadline) throw new SQLTimeoutException("Query deadline expired", ex);
                 throw ex;
             }
         }

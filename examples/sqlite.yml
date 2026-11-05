@@ -1,0 +1,6 @@
+# Merge into plugins/CoreProtectAddon/config.yml, then run /coq reload.
+# CoreProtect must already be enabled and running with database-type: sqlite.
+# After changing CoreProtect's engine/target, run /co reload (or restart), then /coq reload.
+database-type: sqlite
+# The existing database file and table prefix are read from CoreProtect's runtime.
+# No path, credentials, database.tables or table-prefix settings are needed here.
